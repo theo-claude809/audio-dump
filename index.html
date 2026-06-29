@@ -18,8 +18,8 @@
   --mute:  #40404c;
   --mono:  'SF Mono','Fira Code','Cascadia Code',ui-monospace,monospace;
 }
-html,body { height:100%; background:var(--bg); color:var(--text); font-family:var(--mono); }
-body { display:flex; flex-direction:column; align-items:center; padding:52px 20px 40px; }
+html { height:100%; }
+body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text); font-family:var(--mono); display:flex; flex-direction:column; align-items:center; padding:52px 20px 56px; }
 .eye { font-size:10px; letter-spacing:5px; text-transform:uppercase; color:var(--mute); margin-bottom:44px; }
 
 #tap {
@@ -93,7 +93,11 @@ const SKIP = new Set([
   'Source-ambiguous sounds','Outside, rural or natural',
   'Inside, small room','Inside, large room or hall',
   'Outside, urban or manmade environment',
-  'Domestic sounds, home sounds','Mechanisms','Tools','Environmental noise'
+  'Domestic sounds, home sounds','Mechanisms','Tools','Environmental noise',
+  // Speech — will dominate any clip you talk during; filter so env detail shows through
+  'Speech','Male speech, man speaking','Female speech, woman speaking',
+  'Narration, monologue','Monologue',
+  'Sound effect','Audio signal processing'
 ]);
 
 // ── DOM ──────────────────────────────────────────────────────────────────
