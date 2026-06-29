@@ -6,167 +6,115 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <title>audio dump</title>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
-  --bg:      #0a0a0c;
-  --card:    #131317;
-  --border:  #1f1f27;
-  --green:   #4ade80;
-  --red:     #ef4444;
-  --text:    #c0c0cc;
-  --muted:   #40404c;
-  --dim:     #28282f;
-  --mono:    'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+  --bg:    #0a0a0c;
+  --card:  #131317;
+  --bord:  #1f1f27;
+  --green: #4ade80;
+  --red:   #ef4444;
+  --text:  #c0c0cc;
+  --mute:  #40404c;
+  --mono:  'SF Mono','Fira Code','Cascadia Code',ui-monospace,monospace;
 }
-html, body {
-  height: 100%; background: var(--bg); color: var(--text);
-  font-family: var(--mono);
-  display: flex; flex-direction: column; align-items: center;
-}
-body { padding: 52px 20px 40px; gap: 0; }
+html,body { height:100%; background:var(--bg); color:var(--text); font-family:var(--mono); }
+body { display:flex; flex-direction:column; align-items:center; padding:52px 20px 40px; }
+.eye { font-size:10px; letter-spacing:5px; text-transform:uppercase; color:var(--mute); margin-bottom:44px; }
 
-/* header */
-.eyebrow {
-  font-size: 10px; letter-spacing: 5px; text-transform: uppercase;
-  color: var(--muted); margin-bottom: 44px;
-}
-
-/* tap button */
 #tap {
-  width: 188px; height: 188px; border-radius: 50%;
-  border: 1.5px solid var(--border);
-  background: var(--card);
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 10px;
-  cursor: pointer; user-select: none;
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
-  transition: border-color 0.15s, background 0.15s, transform 0.08s;
-  position: relative; overflow: hidden;
+  width:188px; height:188px; border-radius:50%;
+  border:1.5px solid var(--bord); background:var(--card);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px;
+  cursor:pointer; user-select:none;
+  -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+  transition:border-color .15s, background .15s, transform .08s;
+  position:relative; overflow:hidden;
 }
-#tap:not(.busy):active { transform: scale(0.95); }
-#tap.busy  { cursor: default; }
-#tap.rec   { border-color: var(--red);   background: #130c0c; }
-#tap.proc  { border-color: var(--green); background: #0b110d; }
+#tap:not(.busy):active { transform:scale(.95); }
+#tap.busy  { cursor:default; }
+#tap.rec   { border-color:var(--red);   background:#130c0c; }
+#tap.proc  { border-color:var(--green); background:#0b110d; }
+#tap-icon  { font-size:46px; line-height:1; pointer-events:none; }
+#tap-lbl   { font-size:13px; color:var(--mute); pointer-events:none; }
+#wave      { position:absolute; bottom:0; left:0; right:0; height:42px; display:none; }
 
-#tap-icon  { font-size: 46px; line-height: 1; pointer-events: none; }
-#tap-label { font-size: 13px; color: var(--muted); pointer-events: none; }
+#load-bar  { width:188px; height:1.5px; background:var(--bord); margin-top:18px; display:none; overflow:hidden; }
+#load-fill { height:100%; width:0%; background:var(--green); transition:width .4s ease; }
+#status    { margin-top:12px; font-size:11px; color:var(--mute); letter-spacing:.4px; min-height:16px; text-align:center; }
 
-/* waveform canvas — shown during recording */
-#wave {
-  position: absolute; bottom: 0; left: 0; right: 0;
-  height: 42px; display: none;
-}
-
-/* load / status */
-#load-bar {
-  width: 188px; height: 1.5px; background: var(--border);
-  margin-top: 18px; display: none; overflow: hidden;
-}
-#load-fill {
-  height: 100%; width: 0%; background: var(--green);
-  transition: width 0.4s ease;
-}
-#status {
-  margin-top: 12px; font-size: 11px; color: var(--muted);
-  letter-spacing: 0.4px; min-height: 16px; text-align: center;
-}
-
-/* result card */
-#result {
-  display: none; width: 100%; max-width: 380px;
-  border: 1px solid var(--border); border-radius: 10px;
-  overflow: hidden; margin-top: 32px;
-}
-#result-pre {
-  padding: 18px 18px 14px;
-  font-size: 12.5px; line-height: 1.85; color: #7a7a90;
-  overflow-x: auto; white-space: pre;
-}
-.k { color: #6888b0; }   /* key */
-.s { color: #68b09a; }   /* string val */
-.n { color: #b0a068; }   /* number val */
-.p { color: var(--muted); } /* punctuation */
-
-#result-btns {
-  display: flex; border-top: 1px solid var(--border);
-}
+#result    { display:none; width:100%; max-width:380px; border:1px solid var(--bord); border-radius:10px; overflow:hidden; margin-top:32px; }
+#result-pre { padding:18px 18px 14px; font-size:12.5px; line-height:1.85; color:#7a7a90; overflow-x:auto; white-space:pre; }
+.k { color:#6888b0; } .s { color:#68b09a; } .n { color:#b0a068; } .p { color:var(--mute); }
+#result-btns { display:flex; border-top:1px solid var(--bord); }
 .cbtn {
-  flex: 1; padding: 13px 0;
-  background: transparent; border: none;
-  border-right: 1px solid var(--border);
-  color: var(--muted); font-size: 11.5px; font-family: var(--mono);
-  letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
-  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
-  transition: color 0.1s, background 0.1s;
+  flex:1; padding:13px 0; background:transparent; border:none;
+  border-right:1px solid var(--bord); color:var(--mute);
+  font-size:11.5px; font-family:var(--mono); letter-spacing:1px; text-transform:uppercase;
+  cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+  transition:color .1s, background .1s;
 }
-.cbtn:last-child { border-right: none; }
-.cbtn:active { background: var(--dim); color: var(--text); }
-.cbtn.ok { color: var(--green); }
+.cbtn:last-child { border-right:none; }
+.cbtn:active { background:#1a1a20; color:var(--text); }
+.cbtn.ok { color:var(--green); }
 </style>
 </head>
 <body>
-<p class="eyebrow">audio dump</p>
-
-<div id="tap" class="busy" onclick="handleTap()">
+<p class="eye">audio dump</p>
+<div id="tap" class="busy">
   <canvas id="wave" width="188" height="42"></canvas>
   <span id="tap-icon">🎙</span>
-  <span id="tap-label">loading…</span>
+  <span id="tap-lbl">loading…</span>
 </div>
-
 <div id="load-bar"><div id="load-fill"></div></div>
 <div id="status">initializing</div>
-
 <div id="result">
   <pre id="result-pre"></pre>
   <div id="result-btns">
-    <button class="cbtn" id="btn-json" onclick="copyJSON()">json</button>
-    <button class="cbtn" id="btn-short" onclick="copyShort()">short</button>
+    <button class="cbtn" id="btn-json">json</button>
+    <button class="cbtn" id="btn-short">short</button>
   </div>
 </div>
 
-<script>
-// ─── Config ────────────────────────────────────────────────────────────────
-const CLASS_MAP_URL =
-  'https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv';
-const MODEL_URL =
-  'https://storage.googleapis.com/tfhub-tfjs-modules/google/tfjs-model/yamnet/tfjs/1/model.json';
-const RECORD_MS      = 4000;
-const TARGET_SR      = 16000;
-const TOP_N          = 5;
-const MIN_CONF       = 0.06;
+<script type="module">
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+
+env.allowLocalModels = false;
+env.useBrowserCache  = true;
+
+// ── Config ────────────────────────────────────────────────────────────────
+const MODEL      = 'Xenova/ast-finetuned-audioset-10-10-0.4593';
+const RECORD_MS  = 4000;
+const TARGET_SR  = 16000;
+const TOP_N      = 5;
 const SKIP = new Set([
-  'Sound','Noise','Silence','Human sounds','Animal','Vehicle','Music',
-  'Natural sounds','Source-ambiguous sounds','Outside, rural or natural',
+  'Sound','Noise','Silence','White noise','Static','Hum',
+  'Human sounds','Animal','Vehicle','Music','Natural sounds',
+  'Source-ambiguous sounds','Outside, rural or natural',
   'Inside, small room','Inside, large room or hall',
-  'Outside, urban or manmade environment','Domestic sounds, home sounds',
-  'Mechanisms','Tools','Environmental noise'
+  'Outside, urban or manmade environment',
+  'Domestic sounds, home sounds','Mechanisms','Tools','Environmental noise'
 ]);
 
-// ─── State ─────────────────────────────────────────────────────────────────
-let model     = null;
-let classMap  = null;
-let ready     = false;
-let lastOut   = null;
-let waveRAF   = null;
+// ── DOM ──────────────────────────────────────────────────────────────────
+const tap      = document.getElementById('tap');
+const tapIcon  = document.getElementById('tap-icon');
+const tapLbl   = document.getElementById('tap-lbl');
+const waveEl   = document.getElementById('wave');
+const waveCtx  = waveEl.getContext('2d');
+const loadBar  = document.getElementById('load-bar');
+const loadFill = document.getElementById('load-fill');
+const statusEl = document.getElementById('status');
+const resultEl = document.getElementById('result');
+const resPre   = document.getElementById('result-pre');
+const btnJson  = document.getElementById('btn-json');
+const btnShort = document.getElementById('btn-short');
 
-// ─── DOM refs ──────────────────────────────────────────────────────────────
-const tap       = document.getElementById('tap');
-const tapIcon   = document.getElementById('tap-icon');
-const tapLabel  = document.getElementById('tap-label');
-const waveEl    = document.getElementById('wave');
-const waveCtx   = waveEl.getContext('2d');
-const loadBar   = document.getElementById('load-bar');
-const loadFill  = document.getElementById('load-fill');
-const statusEl  = document.getElementById('status');
-const resultEl  = document.getElementById('result');
-const resultPre = document.getElementById('result-pre');
-const btnJson   = document.getElementById('btn-json');
-const btnShort  = document.getElementById('btn-short');
+let classifier = null;
+let ready      = false;
+let lastOut    = null;
+let waveRAF    = null;
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
 const setStatus = s => { statusEl.textContent = s; };
 const setProgress = pct => {
   loadBar.style.display = 'block';
@@ -175,27 +123,24 @@ const setProgress = pct => {
 };
 const hhmm = () => {
   const d = new Date();
-  return d.getHours().toString().padStart(2,'0') + ':' +
-         d.getMinutes().toString().padStart(2,'0');
+  return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
 };
 
-// ─── Waveform animation ────────────────────────────────────────────────────
+// ── Waveform viz ─────────────────────────────────────────────────────────
 function startWave(analyser) {
   waveEl.style.display = 'block';
   const bins = new Uint8Array(analyser.frequencyBinCount);
-  const W = waveEl.width, H = waveEl.height;
-  const BARS = 14, gap = 3;
-  const barW = (W - gap * (BARS - 1)) / BARS;
-
+  const W = 188, H = 42, BARS = 14, gap = 3;
+  const bw = (W - gap * (BARS - 1)) / BARS;
   function draw() {
     analyser.getByteFrequencyData(bins);
     waveCtx.clearRect(0, 0, W, H);
     for (let i = 0; i < BARS; i++) {
       const v = bins[i] / 255;
       const h = Math.max(3, v * H);
-      waveCtx.fillStyle = `rgba(239, 68, 68, ${0.4 + v * 0.6})`;
+      waveCtx.fillStyle = `rgba(239,68,68,${0.4 + v * 0.6})`;
       waveCtx.beginPath();
-      waveCtx.roundRect(i * (barW + gap), H - h, barW, h, 2);
+      waveCtx.roundRect(i * (bw + gap), H - h, bw, h, 2);
       waveCtx.fill();
     }
     waveRAF = requestAnimationFrame(draw);
@@ -206,123 +151,123 @@ function stopWave() {
   if (waveRAF) cancelAnimationFrame(waveRAF);
   waveRAF = null;
   waveEl.style.display = 'none';
-  waveCtx.clearRect(0, 0, waveEl.width, waveEl.height);
+  waveCtx.clearRect(0, 0, 188, 42);
 }
 
-// ─── Init ──────────────────────────────────────────────────────────────────
+// ── WAV encoder ──────────────────────────────────────────────────────────
+function pcmToWav(samples, sr) {
+  const dataLen = samples.length * 2;
+  const buf     = new ArrayBuffer(44 + dataLen);
+  const v       = new DataView(buf);
+  const s = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+  s(0,'RIFF'); v.setUint32(4, 36 + dataLen, true);
+  s(8,'WAVE'); s(12,'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);  v.setUint32(24, sr, true);
+  v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true); s(36,'data');
+  v.setUint32(40, dataLen, true);
+  for (let i = 0; i < samples.length; i++) {
+    const x = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, x * (x < 0 ? 32768 : 32767), true);
+  }
+  return new Blob([buf], { type:'audio/wav' });
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────
 async function init() {
   setProgress(5);
   try {
-    setStatus('fetching class list…');
-    const r = await fetch(CLASS_MAP_URL);
-    const csv = await r.text();
-    classMap = csv.trim().split('\n').slice(1).map(line => {
-      const cols = line.split(',');
-      return cols.slice(2).join(',').replace(/^"|"$/g, '').trim();
+    setStatus('loading model (first run ~20MB, then cached)…');
+    classifier = await pipeline('audio-classification', MODEL, {
+      dtype: 'q8',
+      progress_callback: info => {
+        if (info.status === 'progress' && info.total) {
+          const pct = Math.round((info.loaded / info.total) * 70) + 10;
+          setProgress(pct);
+          setStatus(`downloading model… ${Math.round(info.loaded/1e6)}MB / ${Math.round(info.total/1e6)}MB`);
+        }
+      }
     });
-    setProgress(30);
-    setStatus(`loading model…`);
-    model = await tf.loadGraphModel(MODEL_URL);
     setProgress(100);
     ready = true;
     tap.classList.remove('busy');
-    tapLabel.textContent = 'tap to record';
+    tapLbl.textContent = 'tap to record';
     setStatus('');
-  } catch (e) {
+  } catch(e) {
     setStatus('load failed — ' + e.message);
-    tapLabel.textContent = 'error';
+    tapLbl.textContent = 'error';
     console.error(e);
   }
 }
 
-// ─── Recording ─────────────────────────────────────────────────────────────
+// ── Record ───────────────────────────────────────────────────────────────
 async function recordAudio() {
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    video: false
+    audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false },
+    video:false
   });
-
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx      = new AudioCtx();
   const source   = ctx.createMediaStreamSource(stream);
 
-  // Analyser for viz (no output)
-  const analyser  = ctx.createAnalyser();
-  analyser.fftSize = 64;
+  // Analyser for viz
+  const analyser  = ctx.createAnalyser(); analyser.fftSize = 64;
   source.connect(analyser);
 
-  // ScriptProcessor for capture, silenced to avoid mic feedback
-  const proc    = ctx.createScriptProcessor(4096, 1, 1);
-  const silencer = ctx.createGain();
-  silencer.gain.value = 0;
-  const chunks  = [];
-  proc.onaudioprocess = e =>
-    chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-  source.connect(proc);
-  proc.connect(silencer);
-  silencer.connect(ctx.destination);
+  // ScriptProcessor for capture, silenced
+  const proc     = ctx.createScriptProcessor(4096, 1, 1);
+  const silence  = ctx.createGain(); silence.gain.value = 0;
+  const chunks   = [];
+  proc.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  source.connect(proc); proc.connect(silence); silence.connect(ctx.destination);
 
   startWave(analyser);
-
-  // Countdown
-  const end = Date.now() + RECORD_MS;
+  const end  = Date.now() + RECORD_MS;
   const tick = setInterval(() => {
-    tapLabel.textContent = Math.max(0, (end - Date.now()) / 1000).toFixed(1) + 's';
+    tapLbl.textContent = Math.max(0, (end - Date.now()) / 1000).toFixed(1) + 's';
   }, 80);
 
   await new Promise(r => setTimeout(r, RECORD_MS));
   clearInterval(tick);
   stopWave();
-  proc.disconnect(); silencer.disconnect(); source.disconnect();
+  proc.disconnect(); silence.disconnect(); source.disconnect();
   stream.getTracks().forEach(t => t.stop());
 
-  // Assemble samples
-  const total = chunks.reduce((s, c) => s + c.length, 0);
+  // Assemble
+  const total = chunks.reduce((s,c) => s + c.length, 0);
   const raw   = new Float32Array(total);
-  let off = 0;
-  for (const c of chunks) { raw.set(c, off); off += c.length; }
+  let off = 0; for (const c of chunks) { raw.set(c, off); off += c.length; }
 
-  // Resample → 16 kHz (iOS locks AudioContext to 44100)
+  // Resample to 16kHz (iOS locks to 44100)
   if (ctx.sampleRate !== TARGET_SR) {
     const dstLen = Math.round(raw.length * TARGET_SR / ctx.sampleRate);
     const offCtx = new OfflineAudioContext(1, dstLen, TARGET_SR);
-    const buf    = offCtx.createBuffer(1, raw.length, ctx.sampleRate);
-    buf.copyToChannel(raw, 0);
+    const b = offCtx.createBuffer(1, raw.length, ctx.sampleRate);
+    b.copyToChannel(raw, 0);
     const src = offCtx.createBufferSource();
-    src.buffer = buf; src.connect(offCtx.destination); src.start();
+    src.buffer = b; src.connect(offCtx.destination); src.start();
     const rendered = await offCtx.startRendering();
     await ctx.close();
     return rendered.getChannelData(0);
   }
-
   await ctx.close();
   return raw;
 }
 
-// ─── Inference ─────────────────────────────────────────────────────────────
-async function classify(audio16k) {
-  let inputT = null, outArr = null, meanT = null;
+// ── Classify ─────────────────────────────────────────────────────────────
+async function classify(audio) {
+  const wavBlob = pcmToWav(audio, TARGET_SR);
+  const wavUrl  = URL.createObjectURL(wavBlob);
   try {
-    inputT = tf.tensor1d(audio16k);
-    const out = await model.executeAsync(inputT);
-    outArr = Array.isArray(out) ? out : [out];
-    const scoresT = outArr[0];                  // [frames, 521]
-    meanT = scoresT.mean(0);                    // [521]
-    const arr = await meanT.array();
-
-    return arr
-      .map((s, i) => ({ score: s, label: classMap ? classMap[i] : `cls_${i}` }))
-      .filter(x => x.score >= MIN_CONF && !SKIP.has(x.label))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, TOP_N);
+    const out = await classifier(wavUrl, { top_k: 15 });
+    return out.filter(x => !SKIP.has(x.label)).slice(0, TOP_N);
   } finally {
-    if (inputT) tf.dispose(inputT);
-    if (outArr)  tf.dispose(outArr);
-    if (meanT)   tf.dispose(meanT);
+    URL.revokeObjectURL(wavUrl);
   }
 }
 
-// ─── Main tap handler ──────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────
 async function handleTap() {
   if (!ready) return;
   ready = false;
@@ -333,71 +278,61 @@ async function handleTap() {
 
   try {
     const audio = await recordAudio();
-
-    tap.classList.remove('rec');
-    tap.classList.add('proc');
-    tapIcon.textContent = '⚙️';
-    tapLabel.textContent = 'analyzing…';
-    setStatus('running yamnet…');
+    tap.classList.remove('rec'); tap.classList.add('proc');
+    tapIcon.textContent = '⚙️'; tapLbl.textContent = 'analyzing…';
+    setStatus('running inference…');
 
     const ranked = await classify(audio);
-    const ts     = hhmm();
-    lastOut      = { ts, ranked };
+    const ts = hhmm();
+    lastOut = { ts, ranked };
 
-    // Syntax-highlighted JSON
     const enc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const lines = [
       '<span class="p">{</span>',
       `  <span class="k">"ts"</span><span class="p">:</span> <span class="s">"${ts}"</span><span class="p">,</span>`,
       `  <span class="k">"env"</span><span class="p">: [</span>`,
-      ...ranked.map((d, i) => {
+      ...ranked.map((d,i) => {
         const comma = i < ranked.length - 1 ? '<span class="p">,</span>' : '';
-        const pct = Math.round(d.score * 100);
-        return `    <span class="p">{</span> <span class="k">"label"</span><span class="p">:</span> <span class="s">"${enc(d.label)}"</span><span class="p">,</span> <span class="k">"conf"</span><span class="p">:</span> <span class="n">${pct}</span> <span class="p">}</span>${comma}`;
+        return `    <span class="p">{</span> <span class="k">"label"</span><span class="p">:</span> <span class="s">"${enc(d.label)}"</span><span class="p">,</span> <span class="k">"conf"</span><span class="p">:</span> <span class="n">${Math.round(d.score * 100)}</span> <span class="p">}</span>${comma}`;
       }),
-      `  <span class="p">]</span>`,
+      '  <span class="p">]</span>',
       '<span class="p">}</span>'
     ];
-    resultPre.innerHTML = lines.join('\n');
+    resPre.innerHTML = lines.join('\n');
     resultEl.style.display = 'block';
     setStatus('done');
 
-  } catch (e) {
+  } catch(e) {
     setStatus('error — ' + e.message);
     console.error(e);
   }
 
   tap.classList.remove('busy','rec','proc');
-  tapIcon.textContent = '🎙';
-  tapLabel.textContent = 'tap to record';
+  tapIcon.textContent = '🎙'; tapLbl.textContent = 'tap to record';
   ready = true;
 }
 
-// ─── Copy ──────────────────────────────────────────────────────────────────
+// ── Copy ─────────────────────────────────────────────────────────────────
 function doCopy(text, btn, label) {
-  (navigator.clipboard
-    ? navigator.clipboard.writeText(text)
-    : Promise.resolve(document.execCommand('copy',false,text))
-  ).then(() => {
-    btn.textContent = '✓ copied'; btn.classList.add('ok');
-    setTimeout(() => { btn.textContent = label; btn.classList.remove('ok'); }, 1600);
-  }).catch(e => console.error('copy failed', e));
+  navigator.clipboard.writeText(text)
+    .then(() => { btn.textContent = '✓ copied'; btn.classList.add('ok'); setTimeout(() => { btn.textContent = label; btn.classList.remove('ok'); }, 1600); })
+    .catch(console.error);
 }
-
 function copyJSON() {
   if (!lastOut) return;
-  const obj = { ts: lastOut.ts, env: lastOut.ranked.map(d => ({
-    label: d.label, conf: Math.round(d.score * 100)
-  }))};
+  const obj = { ts: lastOut.ts, env: lastOut.ranked.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
   doCopy(JSON.stringify(obj, null, 2), btnJson, 'json');
 }
 function copyShort() {
   if (!lastOut) return;
-  const body = lastOut.ranked.map(d => `${d.label} (${Math.round(d.score*100)}%)`).join(' · ');
+  const body = lastOut.ranked.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ');
   doCopy(`🎙 ${lastOut.ts} | ${body}`, btnShort, 'short');
 }
 
-// ─── Go ────────────────────────────────────────────────────────────────────
+// ── Wire up ──────────────────────────────────────────────────────────────
+tap.addEventListener('click', handleTap);
+btnJson.addEventListener('click', copyJSON);
+btnShort.addEventListener('click', copyShort);
 init();
 </script>
 </body>
