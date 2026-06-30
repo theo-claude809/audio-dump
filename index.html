@@ -43,6 +43,21 @@ body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text)
 #load-fill { height:100%; width:0%; background:var(--green); transition:width .4s ease; }
 #status    { margin-top:12px; font-size:11px; color:var(--mute); letter-spacing:.4px; min-height:16px; text-align:center; }
 
+#bird {
+  margin-top:22px; padding:10px 22px; border-radius:20px;
+  border:1.5px solid var(--bord); background:var(--card); color:var(--mute);
+  display:flex; align-items:center; gap:8px;
+  cursor:pointer; user-select:none;
+  -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+  font-family:var(--mono); font-size:12px; letter-spacing:.4px;
+  transition:border-color .15s, background .15s, transform .08s;
+}
+#bird:active   { transform:scale(.96); }
+#bird.busy     { cursor:default; opacity:.55; }
+#bird.proc     { border-color:var(--green); background:#0b110d; }
+#bird-icon     { font-size:16px; line-height:1; pointer-events:none; }
+#bird-status   { margin-top:10px; font-size:11px; color:var(--mute); letter-spacing:.4px; min-height:14px; text-align:center; }
+
 #result    { display:none; width:100%; max-width:380px; border:1px solid var(--bord); border-radius:10px; overflow:hidden; margin-top:32px; }
 #result-pre { padding:18px 18px 14px; font-size:12.5px; line-height:1.85; color:#7a7a90; overflow-x:auto; white-space:pre; }
 .k { color:#6888b0; } .s { color:#68b09a; } .n { color:#b0a068; } .p { color:var(--mute); }
@@ -68,6 +83,10 @@ body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text)
 </div>
 <div id="load-bar"><div id="load-fill"></div></div>
 <div id="status">initializing</div>
+<div id="bird">
+  <span id="bird-icon">🐦</span><span id="bird-lbl">bird id</span>
+</div>
+<div id="bird-status"></div>
 <div id="result">
   <pre id="result-pre"></pre>
   <div id="result-btns">
@@ -92,8 +111,13 @@ const SKIP = new Set([
   'Human sounds','Animal','Vehicle','Music','Natural sounds',
   'Source-ambiguous sounds','Outside, rural or natural',
   'Inside, small room','Inside, large room or hall',
-  'Outside, urban or manmade environment',
+  // FIX: real AudioSet label has no "environment" suffix — old entry never matched
+  'Outside, urban or manmade',
   'Domestic sounds, home sounds','Mechanisms','Tools','Environmental noise',
+  // Mic/recording artifacts — not real environmental signal
+  'Wind noise (microphone)',
+  // Frequent misfires/low-value on walks (footsteps reading as chewing, etc.)
+  'Clicking','Chewing, mastication','Biting','Explosion','Snort',
   // Speech — will dominate any clip you talk during; filter so env detail shows through
   'Speech','Male speech, man speaking','Female speech, woman speaking',
   'Narration, monologue','Monologue',
@@ -206,7 +230,7 @@ async function init() {
 }
 
 // ── Record ───────────────────────────────────────────────────────────────
-async function recordAudio() {
+async function recordAudio(targetSR = TARGET_SR, recordMs = RECORD_MS, labelEl = tapLbl) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false },
     video:false
@@ -215,9 +239,10 @@ async function recordAudio() {
   const ctx      = new AudioCtx();
   const source   = ctx.createMediaStreamSource(stream);
 
-  // Analyser for viz
+  // Analyser for viz (only meaningful on the main button, harmless otherwise)
   const analyser  = ctx.createAnalyser(); analyser.fftSize = 64;
   source.connect(analyser);
+  if (labelEl === tapLbl) startWave(analyser);
 
   // ScriptProcessor for capture, silenced
   const proc     = ctx.createScriptProcessor(4096, 1, 1);
@@ -226,15 +251,14 @@ async function recordAudio() {
   proc.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   source.connect(proc); proc.connect(silence); silence.connect(ctx.destination);
 
-  startWave(analyser);
-  const end  = Date.now() + RECORD_MS;
+  const end  = Date.now() + recordMs;
   const tick = setInterval(() => {
-    tapLbl.textContent = Math.max(0, (end - Date.now()) / 1000).toFixed(1) + 's';
+    if (labelEl) labelEl.textContent = Math.max(0, (end - Date.now()) / 1000).toFixed(1) + 's';
   }, 80);
 
-  await new Promise(r => setTimeout(r, RECORD_MS));
+  await new Promise(r => setTimeout(r, recordMs));
   clearInterval(tick);
-  stopWave();
+  if (labelEl === tapLbl) stopWave();
   proc.disconnect(); silence.disconnect(); source.disconnect();
   stream.getTracks().forEach(t => t.stop());
 
@@ -243,10 +267,10 @@ async function recordAudio() {
   const raw   = new Float32Array(total);
   let off = 0; for (const c of chunks) { raw.set(c, off); off += c.length; }
 
-  // Resample to 16kHz (iOS locks to 44100)
-  if (ctx.sampleRate !== TARGET_SR) {
-    const dstLen = Math.round(raw.length * TARGET_SR / ctx.sampleRate);
-    const offCtx = new OfflineAudioContext(1, dstLen, TARGET_SR);
+  // Resample to target rate (iOS locks the AudioContext to 44100/48000)
+  if (ctx.sampleRate !== targetSR) {
+    const dstLen = Math.round(raw.length * targetSR / ctx.sampleRate);
+    const offCtx = new OfflineAudioContext(1, dstLen, targetSR);
     const b = offCtx.createBuffer(1, raw.length, ctx.sampleRate);
     b.copyToChannel(raw, 0);
     const src = offCtx.createBufferSource();
@@ -271,6 +295,26 @@ async function classify(audio) {
   }
 }
 
+// ── Result rendering (shared by ambient + bird results) ────────────────────
+const enc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function renderResult(kind, key, ranked) {
+  const ts = hhmm();
+  lastOut = { ts, ranked, kind, key };
+  const lines = [
+    '<span class="p">{</span>',
+    `  <span class="k">"ts"</span><span class="p">:</span> <span class="s">"${ts}"</span><span class="p">,</span>`,
+    `  <span class="k">"${key}"</span><span class="p">: [</span>`,
+    ...ranked.map((d,i) => {
+      const comma = i < ranked.length - 1 ? '<span class="p">,</span>' : '';
+      return `    <span class="p">{</span> <span class="k">"label"</span><span class="p">:</span> <span class="s">"${enc(d.label)}"</span><span class="p">,</span> <span class="k">"conf"</span><span class="p">:</span> <span class="n">${Math.round(d.score * 100)}</span> <span class="p">}</span>${comma}`;
+    }),
+    '  <span class="p">]</span>',
+    '<span class="p">}</span>'
+  ];
+  resPre.innerHTML = lines.join('\n');
+  resultEl.style.display = 'block';
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 async function handleTap() {
   if (!ready) return;
@@ -287,23 +331,7 @@ async function handleTap() {
     setStatus('running inference…');
 
     const ranked = await classify(audio);
-    const ts = hhmm();
-    lastOut = { ts, ranked };
-
-    const enc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const lines = [
-      '<span class="p">{</span>',
-      `  <span class="k">"ts"</span><span class="p">:</span> <span class="s">"${ts}"</span><span class="p">,</span>`,
-      `  <span class="k">"env"</span><span class="p">: [</span>`,
-      ...ranked.map((d,i) => {
-        const comma = i < ranked.length - 1 ? '<span class="p">,</span>' : '';
-        return `    <span class="p">{</span> <span class="k">"label"</span><span class="p">:</span> <span class="s">"${enc(d.label)}"</span><span class="p">,</span> <span class="k">"conf"</span><span class="p">:</span> <span class="n">${Math.round(d.score * 100)}</span> <span class="p">}</span>${comma}`;
-      }),
-      '  <span class="p">]</span>',
-      '<span class="p">}</span>'
-    ];
-    resPre.innerHTML = lines.join('\n');
-    resultEl.style.display = 'block';
+    renderResult('env', 'env', ranked);
     setStatus('done');
 
   } catch(e) {
@@ -324,19 +352,243 @@ function doCopy(text, btn, label) {
 }
 function copyJSON() {
   if (!lastOut) return;
-  const obj = { ts: lastOut.ts, env: lastOut.ranked.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
+  const obj = { ts: lastOut.ts, [lastOut.key]: lastOut.ranked.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
   doCopy(JSON.stringify(obj, null, 2), btnJson, 'json');
 }
 function copyShort() {
   if (!lastOut) return;
+  const icon = lastOut.kind === 'bird' ? '🐦' : '🎙';
   const body = lastOut.ranked.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ');
-  doCopy(`🎙 ${lastOut.ts} | ${body}`, btnShort, 'short');
+  doCopy(`${icon} ${lastOut.ts} | ${body}`, btnShort, 'short');
+}
+
+// ── BirdNET (species ID) ────────────────────────────────────────────────
+// Model + custom MelSpec/STFT kernel adapted from georg95/birdnet-web
+// (Cornell Lab of Ornithology BirdNET, CC BY-NC-SA 4.0)
+const BIRD_BASE   = 'https://cdn.jsdelivr.net/gh/georg95/birdnet-web@main/models/birdnet';
+const BIRD_SR     = 48000;
+const BIRD_MS     = 3000;
+const BIRD_LEN    = 144000; // 3s @ 48kHz, fixed input shape the model expects
+const BIRD_MIN_CONF = 0.08;
+const BIRD_TOP_N  = 5;
+
+const birdBtn    = document.getElementById('bird');
+const birdIcon   = document.getElementById('bird-icon');
+const birdLbl    = document.getElementById('bird-lbl');
+const birdStatus = document.getElementById('bird-status');
+const setBirdStatus = s => { birdStatus.textContent = s; };
+
+let birdReady  = false;
+let birdBusy   = false;
+let birdModel  = null;
+let birdLabels = null;
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+function registerBirdNetKernels(tf) {
+  class MelSpecLayerSimple extends tf.layers.Layer {
+    constructor(config) {
+      super(config);
+      this.sampleRate    = config.sampleRate;
+      this.specShape     = config.specShape;
+      this.frameStep     = config.frameStep;
+      this.frameLength   = config.frameLength;
+      this.melFilterbank = tf.tensor2d(config.melFilterbank);
+    }
+    build(inputShape) {
+      this.magScale = this.addWeight('magnitude_scaling', [], 'float32', tf.initializers.constant({ value: 1.23 }));
+      super.build(inputShape);
+    }
+    computeOutputShape(inputShape) { return [inputShape[0], this.specShape[0], this.specShape[1], 1]; }
+    call(inputs) {
+      return tf.tidy(() => {
+        inputs = inputs[0];
+        return tf.stack(inputs.split(inputs.shape[0]).map((input) => {
+          let spec = input.squeeze();
+          spec = tf.sub(spec, tf.min(spec, -1, true));
+          spec = tf.div(spec, tf.max(spec, -1, true).add(0.000001));
+          spec = tf.sub(spec, 0.5);
+          spec = tf.mul(spec, 2.0);
+          spec = tf.engine().runKernel('STFT', { signal: spec, frameLength: this.frameLength, frameStep: this.frameStep });
+          spec = tf.matMul(spec, this.melFilterbank);
+          spec = spec.pow(2.0);
+          spec = spec.pow(tf.div(1.0, tf.add(1.0, tf.exp(this.magScale.read()))));
+          spec = tf.reverse(spec, -1);
+          spec = tf.transpose(spec);
+          spec = spec.expandDims(-1);
+          return spec;
+        }));
+      });
+    }
+    static get className() { return 'MelSpecLayerSimple'; }
+  }
+  tf.serialization.registerClass(MelSpecLayerSimple);
+
+  // WebGL radix-2 real FFT, copied verbatim from georg95/birdnet-web (birdnet.js)
+  tf.registerKernel({
+    kernelName: 'STFT', backendName: 'webgl',
+    kernelFunc: ({ backend, inputs: { signal, frameLength, frameStep } }) => {
+      const innerDim = frameLength / 2;
+      const batch = (signal.size - frameLength + frameStep) / frameStep | 0;
+      let currentTensor = backend.runWebGLProgram({
+        variableNames: ['x'], outputShape: [batch, frameLength],
+        userCode: `
+        void main() {
+            ivec2 coords = getOutputCoords();
+            int p = coords[1] % ${innerDim};
+            int k = 0;
+            for (int i = 0; i < ${Math.log2(innerDim)}; ++i) {
+                if ((p & (1 << i)) != 0) { k |= (1 << (${Math.log2(innerDim) - 1} - i)); }
+            }
+            int i = 2 * k;
+            if (coords[1] >= ${innerDim}) {
+                i = 2 * (k % ${innerDim}) + 1;
+            }
+            int q = coords[0] * ${frameLength} + i;
+            float val = getX((q / ${frameLength}) * ${frameStep} + q % ${frameLength});
+            float cosArg = ${2.0 * Math.PI / frameLength} * float(q);
+            float mul = 0.5 - 0.5 * cos(cosArg);
+            setOutput(val * mul);
+        }`
+      }, [signal], 'float32');
+      for (let len = 1; len < innerDim; len *= 2) {
+        let prevTensor = currentTensor;
+        currentTensor = backend.runWebGLProgram({
+          variableNames: ['x'], outputShape: [batch, innerDim * 2],
+          userCode: `void main() {
+              ivec2 coords = getOutputCoords();
+              int batch = coords[0];
+              int i = coords[1];
+              int k = i % ${innerDim};
+              int isHigh = (k % ${len * 2}) / ${len};
+              int highSign = (1 - isHigh * 2);
+              int baseIndex = k - isHigh * ${len};
+              float t = ${Math.PI / len} * float(k % ${len});
+              float a = cos(t);
+              float b = sin(-t);
+              float oddK_re = getX(batch, baseIndex + ${len});
+              float oddK_im = getX(batch, baseIndex + ${len + innerDim});
+              if (i < ${innerDim}) {
+                  float evenK_re = getX(batch, baseIndex);
+                  setOutput(evenK_re + (oddK_re * a - oddK_im * b) * float(highSign));
+              } else {
+                  float evenK_im = getX(batch, baseIndex + ${innerDim});
+                  setOutput(evenK_im + (oddK_re * b + oddK_im * a) * float(highSign));
+              }
+          }`
+        }, [currentTensor], 'float32');
+        backend.disposeIntermediateTensorInfo(prevTensor);
+      }
+      const real = backend.runWebGLProgram({
+        variableNames: ['x'], outputShape: [batch, innerDim + 1],
+        userCode: `void main() {
+            ivec2 coords = getOutputCoords();
+            int batch = coords[0];
+            int i = coords[1];
+            int zI = i % ${innerDim};
+            int conjI = (${innerDim} - i) % ${innerDim};
+            float Zk0 = getX(batch, zI);
+            float Zk1 = getX(batch, zI+${innerDim});
+            float Zk_conj0 = getX(batch, conjI);
+            float Zk_conj1 = -getX(batch, conjI+${innerDim});
+            float t = ${-2 * Math.PI} * float(i) / float(${innerDim * 2});
+            float diff0 = Zk0 - Zk_conj0;
+            float diff1 = Zk1 - Zk_conj1;
+            float result = (Zk0 + Zk_conj0 + cos(t) * diff1 + sin(t) * diff0) * 0.5;
+            setOutput(result);
+        }`
+      }, [currentTensor], 'float32');
+      backend.disposeIntermediateTensorInfo(currentTensor);
+      return real;
+    }
+  });
+}
+
+async function ensureBirdModel() {
+  if (birdReady) return;
+  setBirdStatus('loading tensorflow.js…');
+  await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js');
+  const tf = window.tf;
+  await tf.setBackend('webgl');
+  await tf.ready();
+  registerBirdNetKernels(tf);
+
+  setBirdStatus('downloading bird model (~50MB, first time only)…');
+  birdModel = await tf.loadLayersModel(`${BIRD_BASE}/model.json`);
+
+  setBirdStatus('loading species labels…');
+  const raw = await fetch(`${BIRD_BASE}/labels/en_us.txt`).then(r => r.text());
+  birdLabels = raw.split('\n').map(l => { const p = l.split('_'); return p[1] || p[0]; }).filter(Boolean);
+
+  setBirdStatus('warming up…');
+  tf.tidy(() => birdModel.predict(tf.zeros([1, BIRD_LEN])).dataSync());
+
+  birdReady = true;
+  setBirdStatus('');
+}
+
+async function classifyBird(samples) {
+  const tf = window.tf;
+  // Pad or trim to exactly 144000 samples (3s @ 48kHz) — fixed model input shape
+  let fixed = samples;
+  if (fixed.length !== BIRD_LEN) {
+    const padded = new Float32Array(BIRD_LEN);
+    padded.set(fixed.subarray(0, Math.min(fixed.length, BIRD_LEN)));
+    fixed = padded;
+  }
+  const scores = tf.tidy(() => birdModel.predict(tf.tensor(fixed, [1, BIRD_LEN])).dataSync());
+  const out = [];
+  for (let i = 0; i < scores.length && i < birdLabels.length; i++) {
+    if (scores[i] >= BIRD_MIN_CONF) out.push({ label: birdLabels[i], score: scores[i] });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, BIRD_TOP_N);
+}
+
+async function handleBirdTap() {
+  if (birdBusy) return;
+  birdBusy = true;
+  birdBtn.classList.add('busy');
+  resultEl.style.display = 'none';
+
+  try {
+    await ensureBirdModel();
+    birdBtn.classList.add('proc');
+    birdIcon.textContent = '⏺'; birdLbl.textContent = 'listening…';
+    setBirdStatus('recording 3s @ 48kHz…');
+
+    const audio = await recordAudio(BIRD_SR, BIRD_MS, birdLbl);
+    birdIcon.textContent = '⚙️'; birdLbl.textContent = 'identifying…';
+    setBirdStatus('running inference…');
+
+    const ranked = await classifyBird(audio);
+    if (ranked.length) {
+      renderResult('bird', 'species', ranked);
+      setBirdStatus('done');
+    } else {
+      setBirdStatus('no confident match');
+    }
+  } catch (e) {
+    setBirdStatus('error — ' + e.message);
+    console.error(e);
+  }
+
+  birdBtn.classList.remove('busy','proc');
+  birdIcon.textContent = '🐦'; birdLbl.textContent = 'bird id';
+  birdBusy = false;
 }
 
 // ── Wire up ──────────────────────────────────────────────────────────────
 tap.addEventListener('click', handleTap);
 btnJson.addEventListener('click', copyJSON);
 btnShort.addEventListener('click', copyShort);
+birdBtn.addEventListener('click', handleBirdTap);
 init();
 </script>
 </body>
