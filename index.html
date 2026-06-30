@@ -423,14 +423,22 @@ function doCopy(text, btn, label) {
 }
 function copyJSON() {
   if (!lastOut) return;
-  const obj = { ts: lastOut.ts, [lastOut.key]: lastOut.ranked.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
+  const toCopy = lastOut.kind === 'env'
+    ? lastOut.ranked.filter(d => d.score >= DELTA_MIN_CONF)
+    : lastOut.ranked;
+  const obj = { ts: lastOut.ts, [lastOut.key]: toCopy.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
   if (lastOut.delta) obj.delta = lastOut.delta.isFirst ? 'first tap' : formatDeltaShort(lastOut.delta);
   doCopy(JSON.stringify(obj, null, 2), btnJson, 'json');
 }
 function copyShort() {
   if (!lastOut) return;
   const icon = lastOut.kind === 'bird' ? '🐦' : '🎙';
-  const body = lastOut.ranked.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ');
+  const toCopy = lastOut.kind === 'env'
+    ? lastOut.ranked.filter(d => d.score >= DELTA_MIN_CONF)
+    : lastOut.ranked;
+  const body = toCopy.length
+    ? toCopy.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ')
+    : 'no confident signal';
   const deltaStr = lastOut.delta ? ` | Δ ${formatDeltaShort(lastOut.delta)}` : '';
   doCopy(`${icon} ${lastOut.ts} | ${body}${deltaStr}`, btnShort, 'short');
 }
