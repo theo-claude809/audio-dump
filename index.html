@@ -147,6 +147,7 @@ let waveRAF    = null;
 let prevEnv     = null;   // [{label, score}] from the previous env tap
 let envStreaks  = {};     // label -> consecutive tap count it's appeared in
 let prevEnvTime = null;   // Date.now() of the previous env tap
+const DELTA_MIN_CONF = 0.06; // below this, a label is noise-floor guessing, not a real detection
 
 const setStatus = s => { statusEl.textContent = s; };
 const setProgress = pct => {
@@ -309,13 +310,19 @@ function computeDelta(ranked) {
   const isFirst    = prevEnv === null;
   const now        = Date.now();
   const secsSince  = prevEnvTime !== null ? Math.round((now - prevEnvTime) / 1000) : null;
-  const curLabels  = new Set(ranked.map(d => d.label));
+
+  // Only labels clearing the confidence floor count as real detections for
+  // diffing purposes — below that it's the model grasping at noise, not signal.
+  const confident   = ranked.filter(d => d.score >= DELTA_MIN_CONF);
+  const indeterminate = confident.length === 0;
+
+  const curLabels  = new Set(confident.map(d => d.label));
   const prevLabels = new Set((prevEnv || []).map(d => d.label));
   const prevByLabel = new Map((prevEnv || []).map(d => [d.label, d.score]));
 
-  const added     = ranked.filter(d => !prevLabels.has(d.label)).map(d => d.label);
+  const added     = confident.filter(d => !prevLabels.has(d.label)).map(d => d.label);
   const dropped   = [...prevLabels].filter(l => !curLabels.has(l));
-  const persisting = ranked
+  const persisting = confident
     .filter(d => prevLabels.has(d.label))
     .map(d => {
       const streak = (envStreaks[d.label] || 1) + 1;
@@ -325,14 +332,14 @@ function computeDelta(ranked) {
 
   // Update streaks: persisting labels increment, everything else resets/drops
   const nextStreaks = {};
-  for (const d of ranked) {
+  for (const d of confident) {
     nextStreaks[d.label] = prevLabels.has(d.label) ? (envStreaks[d.label] || 1) + 1 : 1;
   }
   envStreaks = nextStreaks;
-  prevEnv = ranked;
+  prevEnv = confident;
   prevEnvTime = now;
 
-  return { added, dropped, persisting, isFirst, secsSince };
+  return { added, dropped, persisting, isFirst, secsSince, indeterminate };
 }
 
 function formatElapsed(secs) {
@@ -367,6 +374,7 @@ function renderResult(kind, key, ranked, delta) {
 function formatDeltaShort(delta) {
   if (delta.isFirst) return 'first tap — no prior baseline';
   const elapsed = delta.secsSince !== null ? `[${formatElapsed(delta.secsSince)}] ` : '';
+  if (delta.indeterminate) return elapsed + 'too quiet/uniform — no confident signal';
   const parts = [];
   delta.added.forEach(l => parts.push(`+${l}`));
   delta.dropped.forEach(l => parts.push(`-${l}`));
