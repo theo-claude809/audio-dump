@@ -106,14 +106,12 @@ const MODEL      = 'Xenova/ast-finetuned-audioset-10-10-0.4593';
 const RECORD_MS  = 4000;
 const TARGET_SR  = 16000;
 const TOP_N      = 5;
-const SKIP = new Set([
+
+// Labels the model can be confident in, but that are never useful signal —
+// always filtered regardless of what else is in the result.
+const ALWAYS_SKIP = new Set([
   'Sound','Noise','Silence','White noise','Static','Hum',
-  'Human sounds','Animal','Vehicle','Music','Natural sounds',
-  'Source-ambiguous sounds','Outside, rural or natural',
-  'Inside, small room','Inside, large room or hall',
-  // FIX: real AudioSet label has no "environment" suffix — old entry never matched
-  'Outside, urban or manmade',
-  'Domestic sounds, home sounds','Mechanisms','Tools','Environmental noise',
+  'Source-ambiguous sounds',
   // Mic/recording artifacts — not real environmental signal
   'Wind noise (microphone)',
   // Frequent misfires/low-value on walks (footsteps reading as chewing, etc.)
@@ -123,6 +121,24 @@ const SKIP = new Set([
   'Narration, monologue','Monologue',
   'Sound effect','Audio signal processing'
 ]);
+
+// AudioSet umbrella/parent categories (e.g. "Vehicle" is the parent of "Car",
+// "Truck", "Engine", etc). These get dropped when a more specific child label
+// already cleared a real confidence threshold — but kept as a fallback when
+// the model is confident something's there yet uncertain *what* (e.g. "Car"
+// at 7% while the model's actual vehicle-shaped confidence lives in the
+// "Vehicle" label that used to get silently discarded).
+const FALLBACK = new Set([
+  'Human sounds','Animal','Vehicle','Music','Natural sounds',
+  'Outside, rural or natural',
+  'Inside, small room','Inside, large room or hall',
+  'Outside, urban or manmade',
+  'Domestic sounds, home sounds','Mechanisms','Tools','Environmental noise'
+]);
+
+// If any specific (non-fallback) label clears this, the broad parent adds no
+// value and gets dropped. Below it, the parent is the more honest signal.
+const SPECIFIC_CONF_THRESHOLD = 0.10;
 
 // ── DOM ──────────────────────────────────────────────────────────────────
 const tap      = document.getElementById('tap');
@@ -294,8 +310,13 @@ async function classify(audio) {
   const wavBlob = pcmToWav(audio, TARGET_SR);
   const wavUrl  = URL.createObjectURL(wavBlob);
   try {
-    const out = await classifier(wavUrl, { top_k: 15 });
-    return out.filter(x => !SKIP.has(x.label)).slice(0, TOP_N);
+    const raw = await classifier(wavUrl, { top_k: 25 });
+    const candidates = raw.filter(x => !ALWAYS_SKIP.has(x.label));
+    const specific = candidates.filter(x => !FALLBACK.has(x.label));
+    const fallback = candidates.filter(x => FALLBACK.has(x.label));
+    const hasConfidentSpecific = specific.some(x => x.score >= SPECIFIC_CONF_THRESHOLD);
+    const pool = hasConfidentSpecific ? specific : specific.concat(fallback);
+    return pool.sort((a, b) => b.score - a.score).slice(0, TOP_N);
   } finally {
     URL.revokeObjectURL(wavUrl);
   }
