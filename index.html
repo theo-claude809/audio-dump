@@ -119,7 +119,10 @@ const ALWAYS_SKIP = new Set([
   // Speech — will dominate any clip you talk during; filter so env detail shows through
   'Speech','Male speech, man speaking','Female speech, woman speaking',
   'Narration, monologue','Monologue',
-  'Sound effect','Audio signal processing'
+  'Sound effect','Audio signal processing',
+  // Recurring false positives on walks — suspected phone-handling/touch noise
+  // rather than real environmental signal. Always dropped regardless of confidence.
+  'Animal','Sigh','Mouse','Owl'
 ]);
 
 // AudioSet umbrella/parent categories (e.g. "Vehicle" is the parent of "Car",
@@ -129,7 +132,7 @@ const ALWAYS_SKIP = new Set([
 // at 7% while the model's actual vehicle-shaped confidence lives in the
 // "Vehicle" label that used to get silently discarded).
 const FALLBACK = new Set([
-  'Human sounds','Animal','Vehicle','Music','Natural sounds',
+  'Human sounds','Vehicle','Music','Natural sounds',
   'Outside, rural or natural',
   'Inside, small room','Inside, large room or hall',
   'Outside, urban or manmade',
