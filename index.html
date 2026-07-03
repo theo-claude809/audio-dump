@@ -143,6 +143,15 @@ const FALLBACK = new Set([
 // value and gets dropped. Below it, the parent is the more honest signal.
 const SPECIFIC_CONF_THRESHOLD = 0.10;
 
+// Labels that are known blind spots: the AST model reaches for these when it
+// hears distant/reverberant human vocalizations (kids, shouts, echo tails)
+// that don't match its "Speech" training distribution (close-mic'd, clean).
+// Only suppressed when VAD independently confirms vocal energy is present —
+// unsuppressed elsewhere, so a real howl/roar on a quiet trail still logs.
+const ANIMAL_VOCAL_CONFUSABLE = new Set(['Howl','Sonar','Roar','Bark']);
+// Fraction of the clip VAD must flag as speech before we trust it enough to gate.
+const VAD_SPEECH_FRAC_THRESHOLD = 0.15;
+
 // ── DOM ──────────────────────────────────────────────────────────────────
 const tap      = document.getElementById('tap');
 const tapIcon  = document.getElementById('tap-icon');
@@ -309,12 +318,15 @@ async function recordAudio(targetSR = TARGET_SR, recordMs = RECORD_MS, labelEl =
 }
 
 // ── Classify ─────────────────────────────────────────────────────────────
-async function classify(audio) {
+async function classify(audio, suppressConfusables = false) {
   const wavBlob = pcmToWav(audio, TARGET_SR);
   const wavUrl  = URL.createObjectURL(wavBlob);
   try {
     const raw = await classifier(wavUrl, { top_k: 25 });
-    const candidates = raw.filter(x => !ALWAYS_SKIP.has(x.label));
+    let candidates = raw.filter(x => !ALWAYS_SKIP.has(x.label));
+    if (suppressConfusables) {
+      candidates = candidates.filter(x => !ANIMAL_VOCAL_CONFUSABLE.has(x.label));
+    }
     const specific = candidates.filter(x => !FALLBACK.has(x.label));
     const fallback = candidates.filter(x => FALLBACK.has(x.label));
     const hasConfidentSpecific = specific.some(x => x.score >= SPECIFIC_CONF_THRESHOLD);
@@ -322,6 +334,50 @@ async function classify(audio) {
     return pool.sort((a, b) => b.score - a.score).slice(0, TOP_N);
   } finally {
     URL.revokeObjectURL(wavUrl);
+  }
+}
+
+// ── VAD (voice activity detection) ──────────────────────────────────────
+// Silero VAD via @ricky0123/vad-web, run non-realtime against the already-
+// captured clip. Used only to gate ANIMAL_VOCAL_CONFUSABLE labels above —
+// this is not logged as its own signal, just a filter on the env classifier.
+const VAD_ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+const VAD_ASSET_BASE = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/';
+
+let vadReady    = false;
+let vadInstance = null;
+let vadLoading  = null; // in-flight promise, avoids double-init on rapid taps
+
+async function ensureVAD() {
+  if (vadReady) return;
+  if (vadLoading) return vadLoading;
+  vadLoading = (async () => {
+    await loadScript(VAD_ORT_BASE + 'ort.wasm.min.js');
+    await loadScript(VAD_ASSET_BASE + 'bundle.min.js');
+    vadInstance = await window.vad.NonRealTimeVAD.new({
+      onnxWASMBasePath: VAD_ORT_BASE,
+      baseAssetPath: VAD_ASSET_BASE,
+    });
+    vadReady = true;
+  })();
+  return vadLoading;
+}
+
+// Returns the fraction (0-1) of the clip VAD considers speech. Fails open
+// (returns 0 → no suppression) if the model can't load, so a VAD outage
+// never blocks the core env-tap flow.
+async function speechFraction(audio) {
+  try {
+    await ensureVAD();
+    let speechMs = 0;
+    for await (const { start, end } of vadInstance.run(audio, TARGET_SR)) {
+      speechMs += (end - start);
+    }
+    const totalMs = (audio.length / TARGET_SR) * 1000;
+    return totalMs > 0 ? speechMs / totalMs : 0;
+  } catch (e) {
+    console.error('VAD error (failing open, no suppression):', e);
+    return 0;
   }
 }
 
@@ -424,7 +480,8 @@ async function handleTap() {
     tapIcon.textContent = '⚙️'; tapLbl.textContent = 'analyzing…';
     setStatus('running inference…');
 
-    const ranked = await classify(audio);
+    const speechFrac = await speechFraction(audio);
+    const ranked = await classify(audio, speechFrac >= VAD_SPEECH_FRAC_THRESHOLD);
     const delta  = computeDelta(ranked);
     renderResult('env', 'env', ranked, delta);
     setStatus('done');
