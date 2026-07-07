@@ -179,6 +179,12 @@ let prevEnvTime = null;   // Date.now() of the previous env tap
 // well above the ~1/14 uniform baseline (~7%) to mean anything. Tune this
 // empirically once you've run it on a few real walks.
 const DELTA_MIN_CONF = 0.20;
+// Lower floor used only for the copy-out (JSON/short) — since we're scoring
+// against our own curated label pool now (not an open vocabulary), even
+// sub-DELTA_MIN_CONF labels are meaningful hypotheses, not noise. Set just
+// above the ~7% uniform baseline for a ~14-label CLAP pool, so a genuinely
+// flat/uninformative spread still falls back to "no confident signal."
+const COPY_MIN_CONF = 0.08;
 
 const setStatus = s => { statusEl.textContent = s; };
 const setProgress = pct => {
@@ -502,7 +508,7 @@ function doCopy(text, btn, label) {
 function copyJSON() {
   if (!lastOut) return;
   const toCopy = lastOut.kind === 'env'
-    ? lastOut.ranked.filter(d => d.score >= DELTA_MIN_CONF && !ESCAPE_LABELS.has(d.label))
+    ? lastOut.ranked.filter(d => d.score >= COPY_MIN_CONF && !ESCAPE_LABELS.has(d.label))
     : lastOut.ranked;
   const obj = { ts: lastOut.ts, [lastOut.key]: toCopy.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
   if (lastOut.delta) obj.delta = lastOut.delta.isFirst ? 'first tap' : formatDeltaShort(lastOut.delta);
@@ -512,7 +518,7 @@ function copyShort() {
   if (!lastOut) return;
   const icon = lastOut.kind === 'bird' ? '🐦' : '🎙';
   const toCopy = lastOut.kind === 'env'
-    ? lastOut.ranked.filter(d => d.score >= DELTA_MIN_CONF && !ESCAPE_LABELS.has(d.label))
+    ? lastOut.ranked.filter(d => d.score >= COPY_MIN_CONF && !ESCAPE_LABELS.has(d.label))
     : lastOut.ranked;
   const body = toCopy.length
     ? toCopy.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ')
