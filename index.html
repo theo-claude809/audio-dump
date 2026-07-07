@@ -102,53 +102,52 @@ env.allowLocalModels = false;
 env.useBrowserCache  = true;
 
 // ── Config ────────────────────────────────────────────────────────────────
-const MODEL      = 'Xenova/ast-finetuned-audioset-10-10-0.4593';
+// Swapped from AST/AudioSet (open 527-label closed-set classifier) to CLAP
+// zero-shot audio classification. Instead of the model returning its own
+// labels from a fixed noisy ontology, we supply the exact candidate list
+// below and CLAP scores audio-vs-text similarity for each — a forced
+// comparison among ONLY these options (scores sum to ~100%, not independent).
+const MODEL      = 'Xenova/clap-htsat-unfused';
 const RECORD_MS  = 4000;
-const TARGET_SR  = 16000;
+const TARGET_SR  = 48000; // CLAP's expected input rate
 const TOP_N      = 5;
 
-// Labels the model can be confident in, but that are never useful signal —
-// always filtered regardless of what else is in the result.
-const ALWAYS_SKIP = new Set([
-  'Sound','Noise','Silence','White noise','Static','Hum',
-  'Source-ambiguous sounds',
-  // Mic/recording artifacts — not real environmental signal
-  'Wind noise (microphone)',
-  // Frequent misfires/low-value on walks (footsteps reading as chewing, etc.)
-  'Clicking','Chewing, mastication','Biting','Explosion','Snort',
-  // Speech — will dominate any clip you talk during; filter so env detail shows through
-  'Speech','Male speech, man speaking','Female speech, woman speaking',
-  'Narration, monologue','Monologue',
-  'Sound effect','Audio signal processing',
-  // Recurring false positives on walks — suspected phone-handling/touch noise
-  // rather than real environmental signal. Always dropped regardless of confidence.
-  'Animal','Sigh','Mouse','Owl'
+// Candidate labels for zero-shot comparison. Bird categories are deliberately
+// excluded — BirdNET already owns that and shouldn't compete/double-log here.
+// The two "escape valve" labels at the end give the forced comparison a
+// legitimate place to land when nothing else fits; without them CLAP will
+// confidently mislabel unrelated sounds as whichever candidate is closest.
+const ENV_LABELS = [
+  'a car engine or vehicle passing',
+  'distant traffic noise',
+  'human footsteps or people talking',
+  'construction or power tools',
+  'a dog barking',
+  'wind blowing into a microphone',
+  'running water or a creek',
+  'insects buzzing',
+  'rustling leaves or branches',
+  'rain falling',
+  'a truck backing up with a beeping alarm',
+  'building ventilation or HVAC hum',
+  'unclear or ambient background noise',
+  'silence or very quiet background',
+];
+
+// Escape-valve labels: legitimate "nothing else fit" outcomes. Excluded from
+// delta added/dropped/streak tracking and from the copy-out JSON's "confident"
+// filtering, since winning against the pool isn't the same as a real detection.
+const ESCAPE_LABELS = new Set([
+  'unclear or ambient background noise',
+  'silence or very quiet background',
 ]);
 
-// AudioSet umbrella/parent categories (e.g. "Vehicle" is the parent of "Car",
-// "Truck", "Engine", etc). These get dropped when a more specific child label
-// already cleared a real confidence threshold — but kept as a fallback when
-// the model is confident something's there yet uncertain *what* (e.g. "Car"
-// at 7% while the model's actual vehicle-shaped confidence lives in the
-// "Vehicle" label that used to get silently discarded).
-const FALLBACK = new Set([
-  'Human sounds','Vehicle','Music','Natural sounds',
-  'Outside, rural or natural',
-  'Inside, small room','Inside, large room or hall',
-  'Outside, urban or manmade',
-  'Domestic sounds, home sounds','Mechanisms','Tools','Environmental noise'
-]);
-
-// If any specific (non-fallback) label clears this, the broad parent adds no
-// value and gets dropped. Below it, the parent is the more honest signal.
-const SPECIFIC_CONF_THRESHOLD = 0.10;
-
-// Labels that are known blind spots: the AST model reaches for these when it
-// hears distant/reverberant human vocalizations (kids, shouts, echo tails)
-// that don't match its "Speech" training distribution (close-mic'd, clean).
-// Only suppressed when VAD independently confirms vocal energy is present —
-// unsuppressed elsewhere, so a real howl/roar on a quiet trail still logs.
-const ANIMAL_VOCAL_CONFUSABLE = new Set(['Howl','Sonar','Roar','Bark']);
+// Labels that are known blind spots: distant/reverberant human vocalizations
+// (kids, shouts, echo tails) can land on "a dog barking" since CLAP is
+// comparing against a small fixed pool. Only suppressed when VAD independently
+// confirms vocal energy is present — unsuppressed elsewhere, so a real dog
+// bark on a quiet trail still logs.
+const ANIMAL_VOCAL_CONFUSABLE = new Set(['a dog barking']);
 // Fraction of the clip VAD must flag as speech before we trust it enough to gate.
 const VAD_SPEECH_FRAC_THRESHOLD = 0.15;
 
@@ -175,7 +174,11 @@ let waveRAF    = null;
 let prevEnv     = null;   // [{label, score}] from the previous env tap
 let envStreaks  = {};     // label -> consecutive tap count it's appeared in
 let prevEnvTime = null;   // Date.now() of the previous env tap
-const DELTA_MIN_CONF = 0.06; // below this, a label is noise-floor guessing, not a real detection
+// CLAP scores are relative (sum to ~100% across the candidate pool), not
+// independent per-label probabilities like AST — so the floor needs to sit
+// well above the ~1/14 uniform baseline (~7%) to mean anything. Tune this
+// empirically once you've run it on a few real walks.
+const DELTA_MIN_CONF = 0.20;
 
 const setStatus = s => { statusEl.textContent = s; };
 const setProgress = pct => {
@@ -240,9 +243,8 @@ function pcmToWav(samples, sr) {
 async function init() {
   setProgress(5);
   try {
-    setStatus('loading model (first run ~20MB, then cached)…');
-    classifier = await pipeline('audio-classification', MODEL, {
-      dtype: 'q8',
+    setStatus('loading model (first run — larger download, then cached)…');
+    classifier = await pipeline('zero-shot-audio-classification', MODEL, {
       progress_callback: info => {
         if (info.status === 'progress' && info.total) {
           const pct = Math.round((info.loaded / info.total) * 70) + 10;
@@ -322,16 +324,11 @@ async function classify(audio, suppressConfusables = false) {
   const wavBlob = pcmToWav(audio, TARGET_SR);
   const wavUrl  = URL.createObjectURL(wavBlob);
   try {
-    const raw = await classifier(wavUrl, { top_k: 25 });
-    let candidates = raw.filter(x => !ALWAYS_SKIP.has(x.label));
+    let ranked = await classifier(wavUrl, ENV_LABELS);
     if (suppressConfusables) {
-      candidates = candidates.filter(x => !ANIMAL_VOCAL_CONFUSABLE.has(x.label));
+      ranked = ranked.filter(x => !ANIMAL_VOCAL_CONFUSABLE.has(x.label));
     }
-    const specific = candidates.filter(x => !FALLBACK.has(x.label));
-    const fallback = candidates.filter(x => FALLBACK.has(x.label));
-    const hasConfidentSpecific = specific.some(x => x.score >= SPECIFIC_CONF_THRESHOLD);
-    const pool = hasConfidentSpecific ? specific : specific.concat(fallback);
-    return pool.sort((a, b) => b.score - a.score).slice(0, TOP_N);
+    return ranked.sort((a, b) => b.score - a.score).slice(0, TOP_N);
   } finally {
     URL.revokeObjectURL(wavUrl);
   }
@@ -393,7 +390,7 @@ function computeDelta(ranked) {
 
   // Only labels clearing the confidence floor count as real detections for
   // diffing purposes — below that it's the model grasping at noise, not signal.
-  const confident   = ranked.filter(d => d.score >= DELTA_MIN_CONF);
+  const confident   = ranked.filter(d => d.score >= DELTA_MIN_CONF && !ESCAPE_LABELS.has(d.label));
   const indeterminate = confident.length === 0;
 
   const curLabels  = new Set(confident.map(d => d.label));
@@ -505,7 +502,7 @@ function doCopy(text, btn, label) {
 function copyJSON() {
   if (!lastOut) return;
   const toCopy = lastOut.kind === 'env'
-    ? lastOut.ranked.filter(d => d.score >= DELTA_MIN_CONF)
+    ? lastOut.ranked.filter(d => d.score >= DELTA_MIN_CONF && !ESCAPE_LABELS.has(d.label))
     : lastOut.ranked;
   const obj = { ts: lastOut.ts, [lastOut.key]: toCopy.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
   if (lastOut.delta) obj.delta = lastOut.delta.isFirst ? 'first tap' : formatDeltaShort(lastOut.delta);
@@ -515,7 +512,7 @@ function copyShort() {
   if (!lastOut) return;
   const icon = lastOut.kind === 'bird' ? '🐦' : '🎙';
   const toCopy = lastOut.kind === 'env'
-    ? lastOut.ranked.filter(d => d.score >= DELTA_MIN_CONF)
+    ? lastOut.ranked.filter(d => d.score >= DELTA_MIN_CONF && !ESCAPE_LABELS.has(d.label))
     : lastOut.ranked;
   const body = toCopy.length
     ? toCopy.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ')
