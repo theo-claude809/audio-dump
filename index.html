@@ -22,27 +22,6 @@ html { height:100%; }
 body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text); font-family:var(--mono); display:flex; flex-direction:column; align-items:center; padding:52px 20px 56px; }
 .eye { font-size:10px; letter-spacing:5px; text-transform:uppercase; color:var(--mute); margin-bottom:44px; }
 
-#tap {
-  width:188px; height:188px; border-radius:50%;
-  border:1.5px solid var(--bord); background:var(--card);
-  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px;
-  cursor:pointer; user-select:none;
-  -webkit-tap-highlight-color:transparent; touch-action:manipulation;
-  transition:border-color .15s, background .15s, transform .08s;
-  position:relative; overflow:hidden;
-}
-#tap:not(.busy):active { transform:scale(.95); }
-#tap.busy  { cursor:default; }
-#tap.rec   { border-color:var(--red);   background:#130c0c; }
-#tap.proc  { border-color:var(--green); background:#0b110d; }
-#tap-icon  { font-size:46px; line-height:1; pointer-events:none; }
-#tap-lbl   { font-size:13px; color:var(--mute); pointer-events:none; }
-#wave      { position:absolute; bottom:0; left:0; right:0; height:42px; display:none; }
-
-#load-bar  { width:188px; height:1.5px; background:var(--bord); margin-top:18px; display:none; overflow:hidden; }
-#load-fill { height:100%; width:0%; background:var(--green); transition:width .4s ease; }
-#status    { margin-top:12px; font-size:11px; color:var(--mute); letter-spacing:.4px; min-height:16px; text-align:center; }
-
 #bird {
   margin-top:22px; padding:10px 22px; border-radius:20px;
   border:1.5px solid var(--bord); background:var(--card); color:var(--mute);
@@ -93,13 +72,6 @@ body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text)
 </head>
 <body>
 <p class="eye">audio dump</p>
-<div id="tap" class="busy">
-  <canvas id="wave" width="188" height="42"></canvas>
-  <span id="tap-icon">🎙</span>
-  <span id="tap-lbl">loading…</span>
-</div>
-<div id="load-bar"><div id="load-fill"></div></div>
-<div id="status">initializing</div>
 <div id="bird">
   <span id="bird-icon">🐦</span><span id="bird-lbl">bird id</span>
 </div>
@@ -117,187 +89,21 @@ body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text)
 </div>
 
 <script type="module">
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
-
-env.allowLocalModels = false;
-env.useBrowserCache  = true;
-
-// ── Config ────────────────────────────────────────────────────────────────
-// Swapped from AST/AudioSet (open 527-label closed-set classifier) to CLAP
-// zero-shot audio classification. Instead of the model returning its own
-// labels from a fixed noisy ontology, we supply the exact candidate list
-// below and CLAP scores audio-vs-text similarity for each — a forced
-// comparison among ONLY these options (scores sum to ~100%, not independent).
-const MODEL      = 'Xenova/clap-htsat-unfused';
-const RECORD_MS  = 4000;
-const TARGET_SR  = 48000; // CLAP's expected input rate
-const TOP_N      = 5;
-
-// Candidate labels for zero-shot comparison. Bird categories are deliberately
-// excluded — BirdNET already owns that and shouldn't compete/double-log here.
-// The two "escape valve" labels at the end give the forced comparison a
-// legitimate place to land when nothing else fits; without them CLAP will
-// confidently mislabel unrelated sounds as whichever candidate is closest.
-const ENV_LABELS = [
-  'a car engine or vehicle passing',
-  'nearby traffic noise',
-  'distant traffic noise',
-  'a helicopter overhead',
-  'people talking nearby',
-  'construction or power tools',
-  'a dog barking',
-  'live music or a musical instrument',
-  'wind blowing into a microphone',
-  'running water or a creek',
-  'insects buzzing',
-  'cicadas droning loudly',
-  'rustling leaves or branches',
-  'rain falling',
-  'a truck backing up with a beeping alarm',
-  'building ventilation or HVAC hum',
-  'unclear or ambient background noise',
-  'silence or very quiet background',
-];
-
-// Escape-valve labels: legitimate "nothing else fit" outcomes. Excluded from
-// delta added/dropped/streak tracking and from the copy-out JSON's "confident"
-// filtering, since winning against the pool isn't the same as a real detection.
-const ESCAPE_LABELS = new Set([
-  'unclear or ambient background noise',
-  'silence or very quiet background',
-]);
-
-// Labels that are known blind spots: distant/reverberant human vocalizations
-// (kids, shouts, echo tails) can land on "a dog barking" since CLAP is
-// comparing against a small fixed pool. Only suppressed when VAD independently
-// confirms vocal energy is present — unsuppressed elsewhere, so a real dog
-// bark on a quiet trail still logs.
-const ANIMAL_VOCAL_CONFUSABLE = new Set(['a dog barking']);
-// Fraction of the clip VAD must flag as speech before we trust it enough to gate.
-const VAD_SPEECH_FRAC_THRESHOLD = 0.15;
-
 // ── DOM ──────────────────────────────────────────────────────────────────
-const tap      = document.getElementById('tap');
-const tapIcon  = document.getElementById('tap-icon');
-const tapLbl   = document.getElementById('tap-lbl');
-const waveEl   = document.getElementById('wave');
-const waveCtx  = waveEl.getContext('2d');
-const loadBar  = document.getElementById('load-bar');
-const loadFill = document.getElementById('load-fill');
-const statusEl = document.getElementById('status');
 const resultEl = document.getElementById('result');
 const resPre   = document.getElementById('result-pre');
 const btnJson  = document.getElementById('btn-json');
 const btnShort = document.getElementById('btn-short');
 
-let classifier = null;
-let ready      = false;
 let lastOut    = null;
-let waveRAF    = null;
 
-// Delta tracking — env taps only, in-memory for this session
-let prevEnv     = null;   // [{label, score}] from the previous env tap
-let envStreaks  = {};     // label -> consecutive tap count it's appeared in
-let prevEnvTime = null;   // Date.now() of the previous env tap
-// CLAP scores are relative (sum to ~100% across the candidate pool), not
-// independent per-label probabilities like AST — so the floor needs to sit
-// well above the ~1/14 uniform baseline (~7%) to mean anything. Tune this
-// empirically once you've run it on a few real walks.
-const DELTA_MIN_CONF = 0.20;
-// Lower floor used only for the copy-out (JSON/short) — since we're scoring
-// against our own curated label pool now (not an open vocabulary), even
-// sub-DELTA_MIN_CONF labels are meaningful hypotheses, not noise. Set just
-// above the ~7% uniform baseline for a ~14-label CLAP pool, so a genuinely
-// flat/uninformative spread still falls back to "no confident signal."
-const COPY_MIN_CONF = 0.08;
-
-const setStatus = s => { statusEl.textContent = s; };
-const setProgress = pct => {
-  loadBar.style.display = 'block';
-  loadFill.style.width = pct + '%';
-  if (pct >= 100) setTimeout(() => { loadBar.style.display = 'none'; }, 500);
-};
 const hhmm = () => {
   const d = new Date();
   return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
 };
 
-// ── Waveform viz ─────────────────────────────────────────────────────────
-function startWave(analyser) {
-  waveEl.style.display = 'block';
-  const bins = new Uint8Array(analyser.frequencyBinCount);
-  const W = 188, H = 42, BARS = 14, gap = 3;
-  const bw = (W - gap * (BARS - 1)) / BARS;
-  function draw() {
-    analyser.getByteFrequencyData(bins);
-    waveCtx.clearRect(0, 0, W, H);
-    for (let i = 0; i < BARS; i++) {
-      const v = bins[i] / 255;
-      const h = Math.max(3, v * H);
-      waveCtx.fillStyle = `rgba(239,68,68,${0.4 + v * 0.6})`;
-      waveCtx.beginPath();
-      waveCtx.roundRect(i * (bw + gap), H - h, bw, h, 2);
-      waveCtx.fill();
-    }
-    waveRAF = requestAnimationFrame(draw);
-  }
-  draw();
-}
-function stopWave() {
-  if (waveRAF) cancelAnimationFrame(waveRAF);
-  waveRAF = null;
-  waveEl.style.display = 'none';
-  waveCtx.clearRect(0, 0, 188, 42);
-}
-
-// ── WAV encoder ──────────────────────────────────────────────────────────
-function pcmToWav(samples, sr) {
-  const dataLen = samples.length * 2;
-  const buf     = new ArrayBuffer(44 + dataLen);
-  const v       = new DataView(buf);
-  const s = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
-  s(0,'RIFF'); v.setUint32(4, 36 + dataLen, true);
-  s(8,'WAVE'); s(12,'fmt ');
-  v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-  v.setUint16(22, 1, true);  v.setUint32(24, sr, true);
-  v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true);
-  v.setUint16(34, 16, true); s(36,'data');
-  v.setUint32(40, dataLen, true);
-  for (let i = 0; i < samples.length; i++) {
-    const x = Math.max(-1, Math.min(1, samples[i]));
-    v.setInt16(44 + i * 2, x * (x < 0 ? 32768 : 32767), true);
-  }
-  return new Blob([buf], { type:'audio/wav' });
-}
-
-// ── Init ─────────────────────────────────────────────────────────────────
-async function init() {
-  setProgress(5);
-  try {
-    setStatus('loading model (first run — larger download, then cached)…');
-    classifier = await pipeline('zero-shot-audio-classification', MODEL, {
-      progress_callback: info => {
-        if (info.status === 'progress' && info.total) {
-          const pct = Math.round((info.loaded / info.total) * 70) + 10;
-          setProgress(pct);
-          setStatus(`downloading model… ${Math.round(info.loaded/1e6)}MB / ${Math.round(info.total/1e6)}MB`);
-        }
-      }
-    });
-    setProgress(100);
-    ready = true;
-    tap.classList.remove('busy');
-    tapLbl.textContent = 'tap to record';
-    setStatus('');
-  } catch(e) {
-    setStatus('load failed — ' + e.message);
-    tapLbl.textContent = 'error';
-    console.error(e);
-  }
-}
-
 // ── Record ───────────────────────────────────────────────────────────────
-async function recordAudio(targetSR = TARGET_SR, recordMs = RECORD_MS, labelEl = tapLbl) {
+async function recordAudio(targetSR, recordMs, labelEl = null) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false },
     video:false
@@ -305,11 +111,6 @@ async function recordAudio(targetSR = TARGET_SR, recordMs = RECORD_MS, labelEl =
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx      = new AudioCtx();
   const source   = ctx.createMediaStreamSource(stream);
-
-  // Analyser for viz (only meaningful on the main button, harmless otherwise)
-  const analyser  = ctx.createAnalyser(); analyser.fftSize = 64;
-  source.connect(analyser);
-  if (labelEl === tapLbl) startWave(analyser);
 
   // ScriptProcessor for capture, silenced
   const proc     = ctx.createScriptProcessor(4096, 1, 1);
@@ -325,7 +126,6 @@ async function recordAudio(targetSR = TARGET_SR, recordMs = RECORD_MS, labelEl =
 
   await new Promise(r => setTimeout(r, recordMs));
   clearInterval(tick);
-  if (labelEl === tapLbl) stopWave();
   proc.disconnect(); silence.disconnect(); source.disconnect();
   stream.getTracks().forEach(t => t.stop());
 
@@ -372,117 +172,11 @@ function normalizeGain(samples) {
   return out;
 }
 
-// ── Classify ─────────────────────────────────────────────────────────────
-async function classify(audio, suppressConfusables = false) {
-  const wavBlob = pcmToWav(audio, TARGET_SR);
-  const wavUrl  = URL.createObjectURL(wavBlob);
-  try {
-    let ranked = await classifier(wavUrl, ENV_LABELS);
-    if (suppressConfusables) {
-      ranked = ranked.filter(x => !ANIMAL_VOCAL_CONFUSABLE.has(x.label));
-    }
-    return ranked.sort((a, b) => b.score - a.score).slice(0, TOP_N);
-  } finally {
-    URL.revokeObjectURL(wavUrl);
-  }
-}
-
-// ── VAD (voice activity detection) ──────────────────────────────────────
-// Silero VAD via @ricky0123/vad-web, run non-realtime against the already-
-// captured clip. Used only to gate ANIMAL_VOCAL_CONFUSABLE labels above —
-// this is not logged as its own signal, just a filter on the env classifier.
-const VAD_ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
-const VAD_ASSET_BASE = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/';
-
-let vadReady    = false;
-let vadInstance = null;
-let vadLoading  = null; // in-flight promise, avoids double-init on rapid taps
-
-async function ensureVAD() {
-  if (vadReady) return;
-  if (vadLoading) return vadLoading;
-  vadLoading = (async () => {
-    await loadScript(VAD_ORT_BASE + 'ort.wasm.min.js');
-    await loadScript(VAD_ASSET_BASE + 'bundle.min.js');
-    vadInstance = await window.vad.NonRealTimeVAD.new({
-      onnxWASMBasePath: VAD_ORT_BASE,
-      baseAssetPath: VAD_ASSET_BASE,
-    });
-    vadReady = true;
-  })();
-  return vadLoading;
-}
-
-// Returns the fraction (0-1) of the clip VAD considers speech. Fails open
-// (returns 0 → no suppression) if the model can't load, so a VAD outage
-// never blocks the core env-tap flow.
-async function speechFraction(audio) {
-  try {
-    await ensureVAD();
-    let speechMs = 0;
-    for await (const { start, end } of vadInstance.run(audio, TARGET_SR)) {
-      speechMs += (end - start);
-    }
-    const totalMs = (audio.length / TARGET_SR) * 1000;
-    return totalMs > 0 ? speechMs / totalMs : 0;
-  } catch (e) {
-    console.error('VAD error (failing open, no suppression):', e);
-    return 0;
-  }
-}
-
-// ── Delta (env taps only) ───────────────────────────────────────────────
-// Compares this tap's tags against the previous env tap: what's new, what
-// dropped off, and what's persisting (with a streak count + confidence
-// drift). This is what lets a single tap read as a moment in a sequence
-// rather than an isolated snapshot.
-function computeDelta(ranked) {
-  const isFirst    = prevEnv === null;
-  const now        = Date.now();
-  const secsSince  = prevEnvTime !== null ? Math.round((now - prevEnvTime) / 1000) : null;
-
-  // Only labels clearing the confidence floor count as real detections for
-  // diffing purposes — below that it's the model grasping at noise, not signal.
-  const confident   = ranked.filter(d => d.score >= DELTA_MIN_CONF && !ESCAPE_LABELS.has(d.label));
-  const indeterminate = confident.length === 0;
-
-  const curLabels  = new Set(confident.map(d => d.label));
-  const prevLabels = new Set((prevEnv || []).map(d => d.label));
-  const prevByLabel = new Map((prevEnv || []).map(d => [d.label, d.score]));
-
-  const added     = confident.filter(d => !prevLabels.has(d.label)).map(d => d.label);
-  const dropped   = [...prevLabels].filter(l => !curLabels.has(l));
-  const persisting = confident
-    .filter(d => prevLabels.has(d.label))
-    .map(d => {
-      const streak = (envStreaks[d.label] || 1) + 1;
-      const drift  = Math.round((d.score - prevByLabel.get(d.label)) * 100);
-      return { label: d.label, streak, drift };
-    });
-
-  // Update streaks: persisting labels increment, everything else resets/drops
-  const nextStreaks = {};
-  for (const d of confident) {
-    nextStreaks[d.label] = prevLabels.has(d.label) ? (envStreaks[d.label] || 1) + 1 : 1;
-  }
-  envStreaks = nextStreaks;
-  prevEnv = confident;
-  prevEnvTime = now;
-
-  return { added, dropped, persisting, isFirst, secsSince, indeterminate };
-}
-
-function formatElapsed(secs) {
-  if (secs === null) return '';
-  if (secs < 90) return `${secs}s`;
-  return `${Math.round(secs / 60)}m`;
-}
-
 // ── Result rendering (shared by ambient + bird results) ────────────────────
 const enc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-function renderResult(kind, key, ranked, delta) {
+function renderResult(kind, key, ranked) {
   const ts = hhmm();
-  lastOut = { ts, ranked, kind, key, delta };
+  lastOut = { ts, ranked, kind, key };
   const lines = [
     '<span class="p">{</span>',
     `  <span class="k">"ts"</span><span class="p">:</span> <span class="s">"${ts}"</span><span class="p">,</span>`,
@@ -491,59 +185,11 @@ function renderResult(kind, key, ranked, delta) {
       const comma = i < ranked.length - 1 ? '<span class="p">,</span>' : '';
       return `    <span class="p">{</span> <span class="k">"label"</span><span class="p">:</span> <span class="s">"${enc(d.label)}"</span><span class="p">,</span> <span class="k">"conf"</span><span class="p">:</span> <span class="n">${Math.round(d.score * 100)}</span> <span class="p">}</span>${comma}`;
     }),
-    delta ? '  <span class="p">],</span>' : '  <span class="p">]</span>'
+    '  <span class="p">]</span>',
+    '<span class="p">}</span>'
   ];
-  if (delta) {
-    lines.push(`  <span class="k">"delta"</span><span class="p">:</span> <span class="s">"${enc(formatDeltaShort(delta))}"</span>`);
-  }
-  lines.push('<span class="p">}</span>');
   resPre.innerHTML = lines.join('\n');
   resultEl.style.display = 'block';
-}
-
-function formatDeltaShort(delta) {
-  if (delta.isFirst) return 'first tap — no prior baseline';
-  const elapsed = delta.secsSince !== null ? `[${formatElapsed(delta.secsSince)}] ` : '';
-  if (delta.indeterminate) return elapsed + 'too quiet/uniform — no confident signal';
-  const parts = [];
-  delta.added.forEach(l => parts.push(`+${l}`));
-  delta.dropped.forEach(l => parts.push(`-${l}`));
-  delta.persisting.forEach(p => {
-    const sign = p.drift > 0 ? '+' : '';
-    parts.push(`~${p.label}(${p.streak}${p.drift ? `,${sign}${p.drift}` : ''})`);
-  });
-  return elapsed + (parts.length ? parts.join(' ') : 'no change');
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────
-async function handleTap() {
-  if (!ready) return;
-  ready = false;
-  resultEl.style.display = 'none';
-  tap.classList.add('busy','rec');
-  tapIcon.textContent = '⏺';
-  setStatus('recording…');
-
-  try {
-    const audio = await recordAudio();
-    tap.classList.remove('rec'); tap.classList.add('proc');
-    tapIcon.textContent = '⚙️'; tapLbl.textContent = 'analyzing…';
-    setStatus('running inference…');
-
-    const speechFrac = await speechFraction(audio);
-    const ranked = await classify(audio, speechFrac >= VAD_SPEECH_FRAC_THRESHOLD);
-    const delta  = computeDelta(ranked);
-    renderResult('env', 'env', ranked, delta);
-    setStatus('done');
-
-  } catch(e) {
-    setStatus('error — ' + e.message);
-    console.error(e);
-  }
-
-  tap.classList.remove('busy','rec','proc');
-  tapIcon.textContent = '🎙'; tapLbl.textContent = 'tap to record';
-  ready = true;
 }
 
 // ── Copy ─────────────────────────────────────────────────────────────────
@@ -554,24 +200,16 @@ function doCopy(text, btn, label) {
 }
 function copyJSON() {
   if (!lastOut) return;
-  const toCopy = lastOut.kind === 'env'
-    ? lastOut.ranked.filter(d => d.score >= COPY_MIN_CONF && !ESCAPE_LABELS.has(d.label))
-    : lastOut.ranked;
-  const obj = { ts: lastOut.ts, [lastOut.key]: toCopy.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
-  if (lastOut.delta) obj.delta = lastOut.delta.isFirst ? 'first tap' : formatDeltaShort(lastOut.delta);
+  const obj = { ts: lastOut.ts, [lastOut.key]: lastOut.ranked.map(d => ({ label: d.label, conf: Math.round(d.score * 100) })) };
   doCopy(JSON.stringify(obj, null, 2), btnJson, 'json');
 }
 function copyShort() {
   if (!lastOut) return;
-  const icon = lastOut.kind === 'bird' ? '🐦' : lastOut.kind === 'yamnet' ? '🌊' : '🎙';
-  const toCopy = lastOut.kind === 'env'
-    ? lastOut.ranked.filter(d => d.score >= COPY_MIN_CONF && !ESCAPE_LABELS.has(d.label))
-    : lastOut.ranked;
-  const body = toCopy.length
-    ? toCopy.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ')
+  const icon = lastOut.kind === 'bird' ? '🐦' : '🌊';
+  const body = lastOut.ranked.length
+    ? lastOut.ranked.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ')
     : 'no confident signal';
-  const deltaStr = lastOut.delta ? ` | Δ ${formatDeltaShort(lastOut.delta)}` : '';
-  doCopy(`${icon} ${lastOut.ts} | ${body}${deltaStr}`, btnShort, 'short');
+  doCopy(`${icon} ${lastOut.ts} | ${body}`, btnShort, 'short');
 }
 
 // ── BirdNET (species ID) ────────────────────────────────────────────────
@@ -796,15 +434,13 @@ async function handleBirdTap() {
   birdBusy = false;
 }
 
-// ── YAMNet (test button) ────────────────────────────────────────────────
-// Google's AudioSet-trained classifier, 521 fixed classes — being trialed
-// as a possible replacement/complement for the CLAP zero-shot env tap.
-// Unlike CLAP's forced comparison against ENV_LABELS, YAMNet's classes are
-// independent (not summing to ~100%) and include specific categories CLAP's
-// hand-picked list doesn't (e.g. "Cicada", "Wind chime", "Insect") — the
-// whole reason this is worth testing separately before touching the main
-// button. Kept fully separate/removable: doesn't touch prevEnv/envStreaks
-// delta tracking, doesn't share ENV_LABELS or ESCAPE_LABELS.
+// ── YAMNet (env tap) ─────────────────────────────────────────────────────
+// Google's AudioSet-trained classifier, 521 fixed classes. Replaced the old
+// CLAP zero-shot env tap: CLAP's forced comparison against a small curated
+// label pool needed heavy restraint (confidence floors, escape-valve labels)
+// to avoid false positives, and still over-triggered on things like water
+// sounds. YAMNet's classes are independent (not summing to ~100%) and cover
+// specific categories the CLAP pool didn't (e.g. "Cicada", "Wind chime").
 //
 // NOTE: this is a first pass, untested against the live model — the TF Hub
 // graph model's exact input/output tensor names can vary by conversion.
@@ -815,7 +451,7 @@ async function handleBirdTap() {
 const YAMNET_TFHUB_URL   = 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1';
 const YAMNET_CLASSMAP_URL = 'https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv';
 const YAMNET_SR       = 16000; // YAMNet's expected input rate
-const YAMNET_MS       = RECORD_MS; // reuse the same 4s clip length as the env tap
+const YAMNET_MS       = 4000; // 4s clip length
 const YAMNET_MIN_CONF = 0.15; // AudioSet classes are independent, not a forced pool — tune after real taps
 const YAMNET_TOP_N    = 5;
 
@@ -926,12 +562,10 @@ async function handleYamnetTap() {
 }
 
 // ── Wire up ──────────────────────────────────────────────────────────────
-tap.addEventListener('click', handleTap);
 btnJson.addEventListener('click', copyJSON);
 btnShort.addEventListener('click', copyShort);
 birdBtn.addEventListener('click', handleBirdTap);
 yamnetBtn.addEventListener('click', handleYamnetTap);
-init();
 </script>
 </body>
 </html>
