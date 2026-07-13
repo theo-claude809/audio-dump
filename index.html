@@ -58,6 +58,23 @@ body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text)
 #bird-icon     { font-size:16px; line-height:1; pointer-events:none; }
 #bird-status   { margin-top:10px; font-size:11px; color:var(--mute); letter-spacing:.4px; min-height:14px; text-align:center; }
 
+/* Test button for YAMNet — same styling as #bird, kept separate/removable
+   until we decide whether it's worth folding into the main CLAP flow. */
+#yamnet {
+  margin-top:14px; padding:10px 22px; border-radius:20px;
+  border:1.5px solid var(--bord); background:var(--card); color:var(--mute);
+  display:flex; align-items:center; gap:8px;
+  cursor:pointer; user-select:none;
+  -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+  font-family:var(--mono); font-size:12px; letter-spacing:.4px;
+  transition:border-color .15s, background .15s, transform .08s;
+}
+#yamnet:active   { transform:scale(.96); }
+#yamnet.busy     { cursor:default; opacity:.55; }
+#yamnet.proc     { border-color:var(--green); background:#0b110d; }
+#yamnet-icon     { font-size:16px; line-height:1; pointer-events:none; }
+#yamnet-status   { margin-top:10px; font-size:11px; color:var(--mute); letter-spacing:.4px; min-height:14px; text-align:center; }
+
 #result    { display:none; width:100%; max-width:380px; border:1px solid var(--bord); border-radius:10px; overflow:hidden; margin-top:32px; }
 #result-pre { padding:18px 18px 14px; font-size:12.5px; line-height:1.85; color:#7a7a90; overflow-x:auto; white-space:pre; }
 .k { color:#6888b0; } .s { color:#68b09a; } .n { color:#b0a068; } .p { color:var(--mute); }
@@ -87,6 +104,10 @@ body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text)
   <span id="bird-icon">🐦</span><span id="bird-lbl">bird id</span>
 </div>
 <div id="bird-status"></div>
+<div id="yamnet">
+  <span id="yamnet-icon">🌊</span><span id="yamnet-lbl">yamnet (test)</span>
+</div>
+<div id="yamnet-status"></div>
 <div id="result">
   <pre id="result-pre"></pre>
   <div id="result-btns">
@@ -542,7 +563,7 @@ function copyJSON() {
 }
 function copyShort() {
   if (!lastOut) return;
-  const icon = lastOut.kind === 'bird' ? '🐦' : '🎙';
+  const icon = lastOut.kind === 'bird' ? '🐦' : lastOut.kind === 'yamnet' ? '🌊' : '🎙';
   const toCopy = lastOut.kind === 'env'
     ? lastOut.ranked.filter(d => d.score >= COPY_MIN_CONF && !ESCAPE_LABELS.has(d.label))
     : lastOut.ranked;
@@ -775,11 +796,141 @@ async function handleBirdTap() {
   birdBusy = false;
 }
 
+// ── YAMNet (test button) ────────────────────────────────────────────────
+// Google's AudioSet-trained classifier, 521 fixed classes — being trialed
+// as a possible replacement/complement for the CLAP zero-shot env tap.
+// Unlike CLAP's forced comparison against ENV_LABELS, YAMNet's classes are
+// independent (not summing to ~100%) and include specific categories CLAP's
+// hand-picked list doesn't (e.g. "Cicada", "Wind chime", "Insect") — the
+// whole reason this is worth testing separately before touching the main
+// button. Kept fully separate/removable: doesn't touch prevEnv/envStreaks
+// delta tracking, doesn't share ENV_LABELS or ESCAPE_LABELS.
+//
+// NOTE: this is a first pass, untested against the live model — the TF Hub
+// graph model's exact input/output tensor names can vary by conversion.
+// If ensureYamnetModel()/classifyYamnet() throws on the first real tap,
+// check the error against the model's actual signature (log
+// yamnetModel.inputs / yamnetModel.outputs to inspect) and adjust the
+// execute() call below accordingly.
+const YAMNET_TFHUB_URL   = 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1/default/1';
+const YAMNET_CLASSMAP_URL = 'https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv';
+const YAMNET_SR       = 16000; // YAMNet's expected input rate
+const YAMNET_MS       = RECORD_MS; // reuse the same 4s clip length as the env tap
+const YAMNET_MIN_CONF = 0.15; // AudioSet classes are independent, not a forced pool — tune after real taps
+const YAMNET_TOP_N    = 5;
+
+const yamnetBtn    = document.getElementById('yamnet');
+const yamnetIcon   = document.getElementById('yamnet-icon');
+const yamnetLbl    = document.getElementById('yamnet-lbl');
+const yamnetStatus = document.getElementById('yamnet-status');
+const setYamnetStatus = s => { yamnetStatus.textContent = s; };
+
+let yamnetReady  = false;
+let yamnetBusy   = false;
+let yamnetModel  = null;
+let yamnetLabels = null;
+
+// Minimal CSV parser — handles the one quoted/comma-containing display_name
+// case in the class map (e.g. "Bell, chime, ...") without pulling in a lib.
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '', inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') { inQuotes = !inQuotes; }
+    else if (c === ',' && !inQuotes) { out.push(cur); cur = ''; }
+    else { cur += c; }
+  }
+  out.push(cur);
+  return out;
+}
+
+async function ensureYamnetModel() {
+  if (yamnetReady) return;
+  setYamnetStatus('loading tensorflow.js…');
+  // Reuse tfjs if BirdNET already loaded it on this page load
+  if (!window.tf) {
+    await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js');
+  }
+  const tf = window.tf;
+  if (!tf.getBackend()) { await tf.setBackend('webgl'); }
+  await tf.ready();
+
+  setYamnetStatus('downloading YAMNet (~17MB, first time only)…');
+  yamnetModel = await tf.loadGraphModel(YAMNET_TFHUB_URL, { fromTFHub: true });
+
+  setYamnetStatus('loading class map…');
+  const csvText = await fetch(YAMNET_CLASSMAP_URL).then(r => r.text());
+  yamnetLabels = csvText.trim().split('\n').slice(1) // drop header row
+    .map(line => parseCsvLine(line)[2]) // columns: index,mid,display_name
+    .filter(Boolean);
+
+  setYamnetStatus('warming up…');
+  tf.tidy(() => {
+    const out = yamnetModel.execute(tf.zeros([YAMNET_SR])); // ~1s dummy clip
+    (Array.isArray(out) ? out : [out]).forEach(t => t.dataSync());
+  });
+
+  yamnetReady = true;
+  setYamnetStatus('');
+}
+
+async function classifyYamnet(samples) {
+  const tf = window.tf;
+  return tf.tidy(() => {
+    const input = tf.tensor1d(samples);
+    const out = yamnetModel.execute(input);
+    // Graph model may return a single scores tensor or [scores, embeddings, spectrogram]
+    const scoresT = Array.isArray(out) ? out[0] : out;
+    const meanScores = scoresT.mean(0); // average per-frame scores across the clip
+    const scores = meanScores.dataSync();
+    const ranked = [];
+    for (let i = 0; i < scores.length && i < yamnetLabels.length; i++) {
+      if (scores[i] >= YAMNET_MIN_CONF) ranked.push({ label: yamnetLabels[i], score: scores[i] });
+    }
+    return ranked.sort((a, b) => b.score - a.score).slice(0, YAMNET_TOP_N);
+  });
+}
+
+async function handleYamnetTap() {
+  if (yamnetBusy) return;
+  yamnetBusy = true;
+  yamnetBtn.classList.add('busy');
+  resultEl.style.display = 'none';
+
+  try {
+    await ensureYamnetModel();
+    yamnetBtn.classList.add('proc');
+    yamnetIcon.textContent = '⏺'; yamnetLbl.textContent = 'listening…';
+    setYamnetStatus(`recording ${YAMNET_MS/1000}s @ ${YAMNET_SR/1000}kHz…`);
+
+    const audio = await recordAudio(YAMNET_SR, YAMNET_MS, yamnetLbl);
+    yamnetIcon.textContent = '⚙️'; yamnetLbl.textContent = 'identifying…';
+    setYamnetStatus('running inference…');
+
+    const ranked = await classifyYamnet(audio);
+    if (ranked.length) {
+      renderResult('yamnet', 'yamnet', ranked);
+      setYamnetStatus('done');
+    } else {
+      setYamnetStatus('no confident match');
+    }
+  } catch (e) {
+    setYamnetStatus('error — ' + e.message);
+    console.error(e);
+  }
+
+  yamnetBtn.classList.remove('busy','proc');
+  yamnetIcon.textContent = '🌊'; yamnetLbl.textContent = 'yamnet (test)';
+  yamnetBusy = false;
+}
+
 // ── Wire up ──────────────────────────────────────────────────────────────
 tap.addEventListener('click', handleTap);
 btnJson.addEventListener('click', copyJSON);
 btnShort.addEventListener('click', copyShort);
 birdBtn.addEventListener('click', handleBirdTap);
+yamnetBtn.addEventListener('click', handleYamnetTap);
 init();
 </script>
 </body>
