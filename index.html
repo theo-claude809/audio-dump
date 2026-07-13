@@ -812,7 +812,7 @@ async function handleBirdTap() {
 // check the error against the model's actual signature (log
 // yamnetModel.inputs / yamnetModel.outputs to inspect) and adjust the
 // execute() call below accordingly.
-const YAMNET_TFHUB_URL   = 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1/default/1';
+const YAMNET_TFHUB_URL   = 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1';
 const YAMNET_CLASSMAP_URL = 'https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv';
 const YAMNET_SR       = 16000; // YAMNet's expected input rate
 const YAMNET_MS       = RECORD_MS; // reuse the same 4s clip length as the env tap
