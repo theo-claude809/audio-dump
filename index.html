@@ -85,6 +85,7 @@ body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text)
   <div id="result-btns">
     <button class="cbtn" id="btn-json">json</button>
     <button class="cbtn" id="btn-short">short</button>
+    <button class="cbtn" id="btn-claude">claude</button>
   </div>
 </div>
 
@@ -92,8 +93,15 @@ body { min-height:100%; overflow-y:auto; background:var(--bg); color:var(--text)
 // ── DOM ──────────────────────────────────────────────────────────────────
 const resultEl = document.getElementById('result');
 const resPre   = document.getElementById('result-pre');
-const btnJson  = document.getElementById('btn-json');
-const btnShort = document.getElementById('btn-short');
+const btnJson   = document.getElementById('btn-json');
+const btnShort  = document.getElementById('btn-short');
+const btnClaude = document.getElementById('btn-claude');
+
+// Name of the iOS Shortcut this launches — must match exactly (spaces get
+// URL-encoded below). The Shortcut itself reads whatever's on the clipboard
+// (written by this button just before navigating), prepends GPS/street info,
+// re-copies the combined text, then opens the Claude app.
+const CLAUDE_SHORTCUT_NAME = 'Audio dump Claude';
 
 let lastOut    = null;
 
@@ -210,6 +218,32 @@ function copyShort() {
     ? lastOut.ranked.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ')
     : 'no confident signal';
   doCopy(`${icon} ${lastOut.ts} | ${body}`, btnShort, 'short');
+}
+
+// Copy the short-form summary to the clipboard, then hand off to the
+// "Audio dump Claude" Shortcut, which reads the clipboard, appends GPS/street
+// info, and opens Claude. The navigation must happen inside this click
+// handler (a real user gesture) or iOS will block the shortcuts:// scheme.
+// A short delay after the clipboard write gives it time to actually land
+// before Shortcuts reads it — writeText() resolving doesn't always mean the
+// OS-level clipboard is fully settled before an immediate scheme navigation.
+function sendToClaude() {
+  if (!lastOut) return;
+  const icon = lastOut.kind === 'bird' ? '🐦' : '🌊';
+  const body = lastOut.ranked.length
+    ? lastOut.ranked.map(d => `${d.label} (${Math.round(d.score * 100)}%)`).join(' · ')
+    : 'no confident signal';
+  const text = `${icon} ${lastOut.ts} | ${body}`;
+
+  navigator.clipboard.writeText(text)
+    .then(() => {
+      btnClaude.textContent = '→ claude'; btnClaude.classList.add('ok');
+      setTimeout(() => {
+        window.location.href = 'shortcuts://run-shortcut?name=' + encodeURIComponent(CLAUDE_SHORTCUT_NAME);
+        setTimeout(() => { btnClaude.textContent = 'claude'; btnClaude.classList.remove('ok'); }, 1200);
+      }, 150);
+    })
+    .catch(console.error);
 }
 
 // ── BirdNET (species ID) ────────────────────────────────────────────────
@@ -564,6 +598,7 @@ async function handleYamnetTap() {
 // ── Wire up ──────────────────────────────────────────────────────────────
 btnJson.addEventListener('click', copyJSON);
 btnShort.addEventListener('click', copyShort);
+btnClaude.addEventListener('click', sendToClaude);
 birdBtn.addEventListener('click', handleBirdTap);
 yamnetBtn.addEventListener('click', handleYamnetTap);
 </script>
